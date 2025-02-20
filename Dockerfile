@@ -18,11 +18,16 @@ RUN npm install
 # Copy source code
 COPY . .
 
-# Create output directory
-RUN mkdir -p tts_wav_output
+# Create output directory and set permissions
+RUN mkdir -p tts_wav_output && \
+    chmod 777 tts_wav_output && \
+    chown -R node:node .
 
 # Expose the port the app runs on
 EXPOSE 3000
+
+# Switch to non-root user
+USER node
 
 # Start the application
 CMD ["node", "server.js"]

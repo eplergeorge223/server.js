@@ -16,6 +16,26 @@ const tempDir = isWindows
     ? path.join(process.env.TEMP || 'C:\\Windows\\Temp', 'espeak-output')
     : path.join(process.cwd(), 'tts_wav_output');
 
+// Common installation paths for eSpeak on Windows
+const windowsPaths = [
+    'C:\\Program Files\\eSpeak\\command-ine\\espeak.exe',
+    'C:\\Program Files (x86)\\eSpeak\\command-line\\espeak.exe',
+    'C:\\Program Files\\eSpeak\\espeak.exe',
+    'C:\\Program Files (x86)\\eSpeak\\espeak.exe'
+];
+
+// Function to find eSpeak executable
+function findEspeakPath() {
+    if (!isWindows) return 'espeak';
+    
+    for (const windowsPath of windowsPaths) {
+        if (fs.existsSync(windowsPath)) {
+            return windowsPath;
+        }
+    }
+    throw new Error('eSpeak executable not found. Please ensure eSpeak is installed correctly.');
+}
+
 // Create output directory
 try {
     if (!fs.existsSync(tempDir)) {
@@ -24,6 +44,15 @@ try {
     console.log(`Created temp output folder: ${tempDir}`);
 } catch (err) {
     console.error(`Failed to create output directory: ${err.message}`);
+    process.exit(1);
+}
+
+let espeakPath;
+try {
+    espeakPath = findEspeakPath();
+    console.log(`Found eSpeak at: ${espeakPath}`);
+} catch (err) {
+    console.error(err.message);
     process.exit(1);
 }
 
@@ -44,13 +73,6 @@ app.post('/api/tts', (req, res) => {
             fs.unlinkSync(outputFile);
         }
 
-        // Configure espeak command based on platform
-const espeakCmd = isWindows
-    ? "C:\\Program Files (x86)\\eSpeak\\command-line\\espeak.exe"
-    : "espeak";
-
-
-
         const args = [
             '-v', voice,
             '-s', speed.toString(),
@@ -58,9 +80,9 @@ const espeakCmd = isWindows
             '-w', outputFile
         ];
 
-        console.log('Executing command:', espeakCmd, args.join(' '));
+        console.log('Executing command:', espeakPath, args.join(' '));
 
-        const espeak = spawn(espeakCmd, args, {
+        const espeak = spawn(espeakPath, args, {
             shell: !isWindows  // Use shell only on Linux
         });
 
@@ -81,7 +103,8 @@ const espeakCmd = isWindows
             console.error('Error generating speech:', error);
             return res.status(500).json({
                 error: 'Failed to generate speech',
-                details: error.message
+                details: error.message,
+                path: espeakPath
             });
         });
 
@@ -108,7 +131,7 @@ const espeakCmd = isWindows
                     console.error('Error checking output file:', error);
                     return res.status(500).json({
                         error: error.message,
-                        command: `${espeakCmd} ${args.join(' ')}`,
+                        command: `${espeakPath} ${args.join(' ')}`,
                         stderr: errorOutput,
                         stdout: standardOutput
                     });
@@ -135,5 +158,5 @@ app.get('/audio/:id', (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`eSpeak 1.48.04 SetAudioData TTS server listening on port ${port}`);
+    console.log(`eSpeak TTS server listening on port ${port}`);
 });

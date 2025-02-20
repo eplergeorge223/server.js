@@ -1,23 +1,19 @@
-# Dockerfile
-FROM ubuntu:latest
+# Example Dockerfile using Node 18 LTS
+FROM node:18
 
-# Install eSpeak
+# Install eSpeak (if needed)
 RUN apt-get update && apt-get install -y espeak
-
-# Install Node.js
-RUN apt-get install -y curl
-RUN curl -fsSL https://deb.nodesource.com/setup_14.x | bash -
-RUN apt-get install -y nodejs
 
 WORKDIR /app
 
-# Copy files
+# Copy package.json
 COPY package*.json ./
+
+# Install dependencies
 RUN npm install
 
+# Copy the rest of your server code
 COPY . .
 
-# Expose port 3000
 EXPOSE 3000
-
 CMD ["node", "server.js"]

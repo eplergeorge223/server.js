@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Configure paths for container environment
+// Configure paths - always use Linux style since we're in a container
 const tempDir = path.join(process.cwd(), 'tts_wav_output');
 
 // Create output directory
@@ -20,24 +20,6 @@ try {
 } catch (err) {
     console.error(`Failed to create output directory: ${err.message}`);
     process.exit(1);
-}
-
-// Verify espeak is installed in container
-function verifyEspeak() {
-    try {
-        const result = spawn('which', ['espeak']);
-        return new Promise((resolve, reject) => {
-            result.on('close', (code) => {
-                if (code === 0) {
-                    resolve(true);
-                } else {
-                    reject(new Error('espeak not found in container. Please ensure it is installed.'));
-                }
-            });
-        });
-    } catch (err) {
-        return Promise.reject(err);
-    }
 }
 
 app.use(bodyParser.json());
@@ -66,6 +48,7 @@ app.post('/api/tts', (req, res) => {
 
         console.log('Executing command: espeak', args.join(' '));
 
+        // Use 'espeak' directly without Windows path
         const espeak = spawn('espeak', args);
 
         let errorOutput = '';
@@ -138,14 +121,6 @@ app.get('/audio/:id', (req, res) => {
     }
 });
 
-// Verify espeak is installed before starting server
-verifyEspeak()
-    .then(() => {
-        app.listen(port, () => {
-            console.log(`eSpeak TTS server listening on port ${port}`);
-        });
-    })
-    .catch((err) => {
-        console.error('Failed to start server:', err.message);
-        process.exit(1);
-    });
+app.listen(port, () => {
+    console.log(`eSpeak TTS server listening on port ${port}`);
+});

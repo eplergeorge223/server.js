@@ -1,97 +1,134 @@
-/**
- * server.js
- * Run: node server.js
- * 
- * Expects eSpeak 1.48.04 installed at:
- *   C:\Program Files (x86)\eSpeak\command-line\espeak.exe
- * Adjust the espeakPath if installed elsewhere.
- */
-
 const express = require('express');
 const bodyParser = require('body-parser');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
+
+// Determine if we're running on Windows or Linux
+const isWindows = process.platform === 'win32';
+
+// Configure paths based on platform
+const tempDir = isWindows 
+    ? path.join(process.env.TEMP || 'C:\\Windows\\Temp', 'espeak-output')
+    : path.join(process.cwd(), 'tts_wav_output');
+
+// Create output directory
+try {
+    if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+    }
+    console.log(`Created temp output folder: ${tempDir}`);
+} catch (err) {
+    console.error(`Failed to create output directory: ${err.message}`);
+    process.exit(1);
+}
 
 app.use(bodyParser.json());
 
-// Path to the older eSpeak 1.48.04 command-line exe
-const espeakPath = "C:\\Program Files (x86)\\eSpeak\\command-line\\espeak.exe";
-
-// Temporary output folder
-const outDir = path.join(__dirname, "tts_wav_output");
-if (!fs.existsSync(outDir)) {
-    fs.mkdirSync(outDir);
-    console.log(`Created temp output folder: ${outDir}`);
-}
-
-app.post('/api/tts', async (req, res) => {
+app.post('/api/tts', (req, res) => {
     try {
-        // Validate request
         if (!req.body || !req.body.text) {
             return res.status(400).json({ error: 'Missing required field: text' });
         }
 
-        const { text, voice = "en", speed = 175 } = req.body;
+        const { text, voice = 'en', speed = 175 } = req.body;
+        const audio_id = crypto.randomBytes(16).toString('hex');
+        const outputFile = path.join(tempDir, `audio_${audio_id}.wav`);
 
-        // Generate a unique file name
-        const fileId = crypto.randomBytes(16).toString('hex');
-        const outputFile = path.join(outDir, `audio_${fileId}.wav`);
-
-        // If file already exists for some reason, remove it
+        // Clean up any existing file
         if (fs.existsSync(outputFile)) {
             fs.unlinkSync(outputFile);
         }
 
-        // Build eSpeak arguments
-        // eSpeak.exe -v <voice> -s <speed> "<text>" -w <outputFile>
+        // Configure espeak command based on platform
+        const espeakCmd = isWindows
+            ? '"C:\\Program Files (x86)\\eSpeak\\command-line\\espeak.exe"'
+            : 'espeak';
+
         const args = [
-            "-v", voice,
-            "-s", speed.toString(),
+            '-v', voice,
+            '-s', speed.toString(),
             text,
-            "-w", outputFile
+            '-w', outputFile
         ];
 
-        // Spawn eSpeak to generate the WAV file
-        execFile(espeakPath, args, (error, stdout, stderr) => {
-            if (error) {
-                console.error("Error generating speech:", error);
-                return res.status(500).json({
-                    error: "Failed to generate speech",
-                    details: error.message
-                });
-            }
+        console.log('Executing command:', espeakCmd, args.join(' '));
 
-            // Read the generated WAV file
-            if (!fs.existsSync(outputFile)) {
-                return res.status(500).json({ error: "WAV file was not created." });
-            }
-
-            try {
-                const fileBuffer = fs.readFileSync(outputFile);
-                // Convert to base64
-                const base64Data = fileBuffer.toString('base64');
-
-                // Return as JSON
-                res.json({ base64: base64Data });
-            } catch (err) {
-                console.error("Error reading output file:", err);
-                return res.status(500).json({ error: err.message });
-            } finally {
-                // Cleanup: delete the WAV file
-                fs.unlink(outputFile, (delErr) => {
-                    if (delErr) console.error("Error deleting temp WAV file:", delErr);
-                });
-            }
+        const espeak = spawn(espeakCmd, args, {
+            shell: !isWindows  // Use shell only on Linux
         });
 
-    } catch (err) {
-        console.error("Server error:", err);
-        res.status(500).json({ error: "Internal server error", details: err.message });
+        let errorOutput = '';
+        let standardOutput = '';
+
+        espeak.stdout.on('data', (data) => {
+            standardOutput += data;
+            console.log(`stdout: ${data}`);
+        });
+
+        espeak.stderr.on('data', (data) => {
+            errorOutput += data;
+            console.error(`stderr: ${data}`);
+        });
+
+        espeak.on('error', (error) => {
+            console.error('Error generating speech:', error);
+            return res.status(500).json({
+                error: 'Failed to generate speech',
+                details: error.message
+            });
+        });
+
+        espeak.on('close', (code) => {
+            console.log(`Process exited with code ${code}`);
+            
+            setTimeout(() => {
+                try {
+                    if (fs.existsSync(outputFile)) {
+                        const stats = fs.statSync(outputFile);
+                        if (stats.size > 0) {
+                            return res.json({
+                                audio_id: audio_id,
+                                duration: (stats.size / (22050 * 2)) || 1,
+                                file_size: stats.size
+                            });
+                        } else {
+                            throw new Error('Output file is empty');
+                        }
+                    } else {
+                        throw new Error('Output file was not created');
+                    }
+                } catch (error) {
+                    console.error('Error checking output file:', error);
+                    return res.status(500).json({
+                        error: error.message,
+                        command: `${espeakCmd} ${args.join(' ')}`,
+                        stderr: errorOutput,
+                        stdout: standardOutput
+                    });
+                }
+            }, 1000);
+        });
+
+    } catch (error) {
+        console.error("Server error:", error);
+        return res.status(500).json({ 
+            error: "Internal server error", 
+            details: error.message 
+        });
+    }
+});
+
+app.get('/audio/:id', (req, res) => {
+    const audioFile = path.join(tempDir, `audio_${req.params.id}.wav`);
+    if (fs.existsSync(audioFile)) {
+        res.sendFile(audioFile);
+    } else {
+        res.status(404).json({ error: "Audio file not found" });
     }
 });
 

@@ -45,9 +45,10 @@ app.post('/api/tts', (req, res) => {
         }
 
         // Configure espeak command based on platform
-        const espeakCmd = isWindows
-            ? '"C:\\Program Files (x86)\\eSpeak\\command-line\\espeak.exe"'
-            : 'espeak';
+const espeakCmd = isWindows
+    ? "C:\\Program Files (x86)\\eSpeak\\command-line\\espeak.exe"
+    : "espeak";
+
 
         const args = [
             '-v', voice,

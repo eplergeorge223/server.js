@@ -1,4 +1,5 @@
-console.log("Running on platform:", process.platform);)
+console.log("Running on platform:", process.platform);
+
 
 const express = require('express');
 const bodyParser = require('body-parser');

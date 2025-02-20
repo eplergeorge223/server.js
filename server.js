@@ -118,11 +118,13 @@ app.post('/api/tts', (req, res) => {
 app.get('/audio/:id', (req, res) => {
     const audioFile = path.join(tempDir, `audio_${req.params.id}.wav`);
     if (fs.existsSync(audioFile)) {
+        res.type('audio/wav');  // Explicitly set the MIME type
         res.sendFile(audioFile);
     } else {
         res.status(404).json({ error: "Audio file not found" });
     }
 });
+
 
 app.listen(port, () => {
     console.log(`eSpeak TTS server listening on port ${port}`);

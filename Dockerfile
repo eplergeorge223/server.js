@@ -1,18 +1,13 @@
-# Example Dockerfile using Node 18 LTS
-FROM node:18
+FROM ubuntu:latest
 
-# Install eSpeak (if needed)
+# Install eSpeak for Linux
 RUN apt-get update && apt-get install -y espeak
 
 WORKDIR /app
 
-# Copy package.json
 COPY package*.json ./
-
-# Install dependencies
 RUN npm install
 
-# Copy the rest of your server code
 COPY . .
 
 EXPOSE 3000

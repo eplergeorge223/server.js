@@ -18,9 +18,9 @@ RUN npm install
 # Copy source code
 COPY . .
 
-# Create output directory and set permissions
-RUN mkdir -p tts_wav_output && \
-    chmod 777 tts_wav_output && \
+# Create output directory and set permissions (update to match your code's directory)
+RUN mkdir -p tts_output && \
+    chmod 777 tts_output && \
     chown -R node:node .
 
 # Expose the port the app runs on

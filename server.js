@@ -1,123 +1,178 @@
-const express = require('express');
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+local TTSModule = {}
 
-const app = express();
-const port = process.env.PORT || 3000;
+-- Services
+local SoundService = game:GetService("SoundService")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
-// Use express.json() for parsing JSON bodies
-app.use(express.json());
+-- Constants
+local SAMPLE_RATE = 44100
+local BYTES_PER_SAMPLE = 2
+local BUFFER_SIZE = 4096 -- Process audio in 4KB chunks
 
-// Create a temporary directory for audio output if it doesn't exist
-const tempDir = path.join(process.cwd(), 'tts_output');
-if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
+-- Create audio container
+local AUDIO_CONTAINER = Instance.new("Folder")
+AUDIO_CONTAINER.Name = "TTSAudioContainer"
+AUDIO_CONTAINER.Parent = SoundService
+
+-- State
+local State = {
+	activeSounds = {},
+	isProcessing = false,
+	queue = {},
 }
 
-// CORS headers for Roblox
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    next();
-});
+-- Convert base64 string to binary data (table of numbers)
+local function base64ToBinary(base64)
+    local key = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local binary = {}
+    
+    base64 = string.gsub(base64, "[^" .. key .. "=]", "")
+    
+    local i = 1
+    while i <= #base64 do
+        local a = (string.find(key, string.sub(base64, i, i)) or 0) - 1
+        local b = (string.find(key, string.sub(base64, i+1, i+1)) or 0) - 1
+        local c = (string.find(key, string.sub(base64, i+2, i+2)) or 0) - 1
+        local d = (string.find(key, string.sub(base64, i+3, i+3)) or 0) - 1
+        
+        local val = bit32.lshift(a, 18) + bit32.lshift(b, 12) + bit32.lshift(c, 6) + d
+        
+        table.insert(binary, bit32.extract(val, 16, 8))
+        if c ~= -1 then table.insert(binary, bit32.extract(val, 8, 8)) end
+        if d ~= -1 then table.insert(binary, bit32.extract(val, 0, 8)) end
+        
+        i = i + 4
+    end
+    
+    return binary
+end
 
-// Wrap the espeak process in a promise
-function runEspeak(args) {
-    return new Promise((resolve, reject) => {
-        const espeak = spawn('espeak', args);
-        let errorOutput = '';
+-- Process PCM data: convert binary (16-bit samples) to normalized values (-1 to 1)
+local function processPCMData(binaryData)
+    local samples = {}
+    
+    for i = 1, #binaryData, 2 do
+        local low = binaryData[i]
+        local high = binaryData[i+1] or 0
+        
+        local sample = bit32.bor(bit32.lshift(high, 8), low)
+        if sample > 32767 then sample = sample - 65536 end
+        
+        table.insert(samples, sample / 32768)
+    end
+    
+    return samples
+end
 
-        espeak.stderr.on('data', (data) => {
-            errorOutput += data;
-        });
+-- Create and play the sound from the base64 audio data
+local function createSound(audioData, position, player)
+    local sound = Instance.new("Sound")
+    sound.Volume = 0.8
+    sound.RollOffMode = Enum.RollOffMode.Linear
+    sound.RollOffMaxDistance = 100
 
-        espeak.on('close', (code) => {
-            if (code !== 0) {
-                return reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
-            }
-            resolve();
-        });
+    -- Determine where to parent the sound
+    local container
+    if position then
+        container = Instance.new("Attachment")
+        container.WorldPosition = position
+        container.Parent = workspace.Terrain
+    elseif player and player.Character and player.Character:FindFirstChild("Head") then
+        container = player.Character.Head
+    else
+        container = AUDIO_CONTAINER
+    end
+    sound.Parent = container
 
-        espeak.on('error', reject);
-    });
-}
+    -- Decode and process the audio data
+    local binaryData = base64ToBinary(audioData)
+    local samples = processPCMData(binaryData)
+    
+    local bufferSize = BUFFER_SIZE
+    local currentIndex = 1
+    local connection
+    connection = RunService.Heartbeat:Connect(function()
+        if currentIndex > #samples then
+            connection:Disconnect()
+            sound:Destroy()
+            return
+        end
+        
+        local chunk = {}
+        for i = 1, bufferSize do
+            if currentIndex + i - 1 <= #samples then
+                chunk[i] = samples[currentIndex + i - 1]
+            else
+                break
+            end
+        end
+        
+        if #chunk > 0 then
+            sound:PlayBuffer(chunk)
+            currentIndex = currentIndex + #chunk
+        end
+    end)
+    
+    return sound
+end
 
-// Convert WAV file to raw PCM data using FFmpeg
-function convertToRawPCM(wavFile) {
-    return new Promise((resolve, reject) => {
-        const ffmpeg = spawn('ffmpeg', [
-            '-i', wavFile,
-            '-f', 's16le',  // 16-bit signed little-endian
-            '-acodec', 'pcm_s16le',
-            '-ar', '44100', // Sample rate
-            '-ac', '1',     // Mono
-            '-'             // Output to stdout
-        ]);
+-- The speak function sends the text to the TTS server and plays the audio when received.
+function TTSModule.speak(text, position, player)
+    if not player then error("Player is required") end
 
-        const chunks = [];
-        ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
-        ffmpeg.stderr.on('data', (data) => console.error(`FFmpeg stderr: ${data}`));
+    if State.isProcessing then
+        table.insert(State.queue, { text = text, position = position, player = player })
+        return
+    end
 
-        ffmpeg.on('close', (code) => {
-            if (code === 0) {
-                resolve(Buffer.concat(chunks));
-            } else {
-                reject(new Error(`FFmpeg exited with code ${code}`));
-            }
-        });
+    State.isProcessing = true
 
-        ffmpeg.on('error', reject);
-    });
-}
+    local success, response = pcall(function()
+        return HttpService:PostAsync(
+            "https://your-production-url/api/tts", -- Replace with your actual URL
+            HttpService:JSONEncode({ text = text, voice = "en", speed = 175 }),
+            Enum.HttpContentType.ApplicationJson
+        )
+    end)
 
-app.post('/api/tts', async (req, res) => {
-    try {
-        const { text, voice = 'en', speed = 175 } = req.body;
-        if (!text) {
-            return res.status(400).json({ error: 'Missing required field: text' });
-        }
+    if success then
+        local data = HttpService:JSONDecode(response)
+        if data.audio_data then
+            local sound = createSound(data.audio_data, position, player)
+            if sound then
+                table.insert(State.activeSounds, sound)
+            end
+        else
+            warn("No audio_data returned from TTS API.")
+        end
+    else
+        warn("TTS request failed:", response)
+    end
 
-        // Create a hash for the filename based on the text, voice, and speed
-        const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
-        const wavFile = path.join(tempDir, `audio_${hash}.wav`);
-        const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
+    State.isProcessing = false
 
-        // Run espeak to generate the WAV file
-        await runEspeak(args);
+    if #State.queue > 0 then
+        local nextRequest = table.remove(State.queue, 1)
+        TTSModule.speak(nextRequest.text, nextRequest.position, nextRequest.player)
+    end
+end
 
-        // Convert the generated WAV file to raw PCM data
-        const audioData = await convertToRawPCM(wavFile);
-        const duration = audioData.length / (44100 * 2); // 2 bytes per sample
+-- Stop all currently playing TTS sounds
+function TTSModule.stop(player)
+    for i = #State.activeSounds, 1, -1 do
+        local sound = State.activeSounds[i]
+        if sound and sound.Parent then
+            sound:Stop()
+            sound:Destroy()
+            table.remove(State.activeSounds, i)
+        end
+    end
+end
 
-        // Clean up the WAV file asynchronously
-        fs.unlink(wavFile, (err) => {
-            if (err) {
-                console.error(`Failed to delete ${wavFile}: ${err}`);
-            }
-        });
+function TTSModule.init()
+    TTSModule.stop()
+    return true
+end
 
-        // Send the response with the base64-encoded audio data
-        res.json({
-            audio_data: audioData.toString('base64'),
-            duration: duration,
-            format: {
-                sampleRate: 44100,
-                channels: 1,
-                bitDepth: 16
-            }
-        });
-    } catch (error) {
-        console.error('Error processing TTS request:', error);
-        res.status(500).json({
-            error: 'Internal server error',
-            details: error.message
-        });
-    }
-});
-
-app.listen(port, () => {
-    console.log(`eSpeak TTS server listening on port ${port}`);
-});
+return TTSModule

@@ -1,8 +1,8 @@
 FROM node:18-slim
 
-# Install espeak
+# Install espeak and ffmpeg
 RUN apt-get update && \
-    apt-get install -y espeak && \
+    apt-get install -y espeak ffmpeg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

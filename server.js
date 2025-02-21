@@ -5,17 +5,18 @@ const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 
+// Use express.json() to parse JSON bodies
 app.use(express.json());
 
 // Create a temporary directory for audio output if it doesn't exist
-const tempDir = path.join(process.cwd(), 'tts_output');
+const tempDir = path.join(process.cwd(), 'tts_wav_output');
 if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
 }
 
-// CORS headers for Roblox clients
+// Set CORS headers for Roblox clients
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -112,4 +113,3 @@ app.post('/api/tts', async (req, res) => {
 app.listen(port, () => {
     console.log(`eSpeak TTS server listening on port ${port}`);
 });
-

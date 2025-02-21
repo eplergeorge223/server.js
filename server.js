@@ -8,11 +8,11 @@ const port = process.env.PORT || 8080;
 
 app.use(express.json());
 
-// Create temp directory
-const tempDir = path.join(process.cwd(), 'tts_wav_output');
-if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-    console.log('Created temp output folder:', tempDir);
+// Create audio directory for storage
+const audioDir = path.join(process.cwd(), 'audio');
+if (!fs.existsSync(audioDir)) {
+    fs.mkdirSync(audioDir, { recursive: true });
+    console.log('Created audio storage folder:', audioDir);
 }
 
 app.use((req, res, next) => {
@@ -49,6 +49,9 @@ function runEspeak(args) {
     });
 }
 
+// Serve audio files statically
+app.use('/audio', express.static(audioDir));
+
 app.post('/api/tts', async (req, res) => {
     try {
         const { text, voice = 'en', speed = 175 } = req.body;
@@ -58,50 +61,34 @@ app.post('/api/tts', async (req, res) => {
         
         // Create a unique hash for the audio
         const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
-        const wavFile = path.join(tempDir, `audio_${hash}.wav`);
+        const wavFile = path.join(audioDir, `${hash}.wav`);
         
-        // Generate WAV file
-        const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
-        await runEspeak(args);
+        // Check if file already exists
+        if (!fs.existsSync(wavFile)) {
+            // Generate WAV file
+            const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
+            await runEspeak(args);
+        }
         
-        // Read the WAV file directly
-        const wavData = fs.readFileSync(wavFile);
-        const fileSize = wavData.length;
-        console.log('WAV file size:', fileSize);
+        // Get file stats
+        const stats = fs.statSync(wavFile);
+        const fileSize = stats.size;
         
-        // Get WAV duration (assuming 44.1kHz, 16-bit, mono)
+        // Calculate duration (assuming 44.1kHz, 16-bit, mono)
         const headerSize = 44; // WAV header size
         const duration = (fileSize - headerSize) / (44100 * 2);
         
-        // Encode WAV data as base64
-        const base64Data = wavData.toString('base64');
-        console.log('Base64 data length:', base64Data.length);
+        // Get the base URL from the request
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
         
         const response = {
             audio_id: hash,
-            audio_data: base64Data,
             duration: duration,
             file_size: fileSize,
-            format: {
-                type: 'wav',
-                sampleRate: 44100,
-                channels: 1,
-                bitDepth: 16
-            }
+            url: `${baseUrl}/audio/${hash}.wav`
         };
         
-        console.log('Sending response:', {
-            ...response,
-            audio_data: `[Base64 string length: ${response.audio_data.length}]`
-        });
-        
-        // Clean up the WAV file
-        fs.unlink(wavFile, (err) => {
-            if (err) console.error(`Failed to delete ${wavFile}:`, err);
-            else console.log('WAV file cleaned up');
-        });
-        
-        // Send response
+        console.log('Sending response:', response);
         res.json(response);
         
     } catch (error) {
@@ -113,13 +100,37 @@ app.post('/api/tts', async (req, res) => {
     }
 });
 
+// Add file cleanup endpoint (optional, for maintenance)
+app.post('/api/cleanup', (req, res) => {
+    try {
+        const files = fs.readdirSync(audioDir);
+        const now = Date.now();
+        let cleaned = 0;
+        
+        files.forEach(file => {
+            const filePath = path.join(audioDir, file);
+            const stats = fs.statSync(filePath);
+            // Remove files older than 1 hour
+            if (now - stats.mtimeMs > 3600000) {
+                fs.unlinkSync(filePath);
+                cleaned++;
+            }
+        });
+        
+        res.json({ message: `Cleaned up ${cleaned} files` });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
-        tempDir: tempDir,
-        tempDirExists: fs.existsSync(tempDir),
-        platform: process.platform
+        audioDir: audioDir,
+        audioDirExists: fs.existsSync(audioDir),
+        platform: process.platform,
+        files: fs.readdirSync(audioDir).length
     });
 });
 

@@ -79,7 +79,7 @@ app.post('/api/tts', async (req, res) => {
         const wavFile = path.join(tempDir, `audio_${hash}.wav`);
         const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
         
-        // Run eSpeak to generate the WAV file
+        // Run espeak to generate the WAV file
         await runEspeak(args);
         
         // Convert the generated WAV file to raw PCM data
@@ -113,3 +113,4 @@ app.post('/api/tts', async (req, res) => {
 app.listen(port, () => {
     console.log(`eSpeak TTS server listening on port ${port}`);
 });
+

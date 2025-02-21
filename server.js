@@ -1,5 +1,4 @@
 const express = require('express');
-const bodyParser = require('body-parser');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -8,14 +7,14 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-const tempDir = path.join(process.cwd(), 'tts_output');
+// Use express.json() for parsing JSON bodies
+app.use(express.json());
 
-// Create output directory
+// Create a temporary directory for audio output if it doesn't exist
+const tempDir = path.join(process.cwd(), 'tts_output');
 if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
 }
-
-app.use(bodyParser.json());
 
 // CORS headers for Roblox
 app.use((req, res, next) => {
@@ -25,7 +24,28 @@ app.use((req, res, next) => {
     next();
 });
 
-// Convert WAV to raw PCM data
+// Wrap the espeak process in a promise
+function runEspeak(args) {
+    return new Promise((resolve, reject) => {
+        const espeak = spawn('espeak', args);
+        let errorOutput = '';
+
+        espeak.stderr.on('data', (data) => {
+            errorOutput += data;
+        });
+
+        espeak.on('close', (code) => {
+            if (code !== 0) {
+                return reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
+            }
+            resolve();
+        });
+
+        espeak.on('error', reject);
+    });
+}
+
+// Convert WAV file to raw PCM data using FFmpeg
 function convertToRawPCM(wavFile) {
     return new Promise((resolve, reject) => {
         const ffmpeg = spawn('ffmpeg', [
@@ -34,22 +54,16 @@ function convertToRawPCM(wavFile) {
             '-acodec', 'pcm_s16le',
             '-ar', '44100', // Sample rate
             '-ac', '1',     // Mono
-            '-']);         // Output to stdout
+            '-'             // Output to stdout
+        ]);
 
         const chunks = [];
-        
-        ffmpeg.stdout.on('data', (chunk) => {
-            chunks.push(chunk);
-        });
-
-        ffmpeg.stderr.on('data', (data) => {
-            console.error(`FFmpeg stderr: ${data}`);
-        });
+        ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
+        ffmpeg.stderr.on('data', (data) => console.error(`FFmpeg stderr: ${data}`));
 
         ffmpeg.on('close', (code) => {
             if (code === 0) {
-                const buffer = Buffer.concat(chunks);
-                resolve(buffer);
+                resolve(Buffer.concat(chunks));
             } else {
                 reject(new Error(`FFmpeg exited with code ${code}`));
             }
@@ -61,70 +75,45 @@ function convertToRawPCM(wavFile) {
 
 app.post('/api/tts', async (req, res) => {
     try {
-        if (!req.body || !req.body.text) {
+        const { text, voice = 'en', speed = 175 } = req.body;
+        if (!text) {
             return res.status(400).json({ error: 'Missing required field: text' });
         }
 
-        const { text, voice = 'en', speed = 175 } = req.body;
+        // Create a hash for the filename based on the text, voice, and speed
         const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
         const wavFile = path.join(tempDir, `audio_${hash}.wav`);
+        const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
 
-        const args = [
-            '-v', voice,
-            '-s', speed.toString(),
-            text,
-            '-w', wavFile
-        ];
+        // Run espeak to generate the WAV file
+        await runEspeak(args);
 
-        const espeak = spawn('espeak', args);
+        // Convert the generated WAV file to raw PCM data
+        const audioData = await convertToRawPCM(wavFile);
+        const duration = audioData.length / (44100 * 2); // 2 bytes per sample
 
-        let errorOutput = '';
-        espeak.stderr.on('data', (data) => {
-            errorOutput += data;
-        });
-
-        espeak.on('close', async (code) => {
-            if (code !== 0) {
-                return res.status(500).json({
-                    error: 'eSpeak failed',
-                    details: errorOutput
-                });
-            }
-
-            try {
-                // Convert to raw PCM data
-                const audioData = await convertToRawPCM(wavFile);
-                
-                // Calculate duration based on PCM data
-                const duration = audioData.length / (44100 * 2); // 2 bytes per sample
-                
-                // Clean up WAV file
-                fs.unlinkSync(wavFile);
-
-                // Send response with binary audio data
-                res.json({
-                    audio_data: audioData.toString('base64'),
-                    duration: duration,
-                    format: {
-                        sampleRate: 44100,
-                        channels: 1,
-                        bitDepth: 16
-                    }
-                });
-            } catch (error) {
-                console.error('Conversion error:', error);
-                res.status(500).json({
-                    error: 'Audio conversion failed',
-                    details: error.message
-                });
+        // Clean up the WAV file asynchronously
+        fs.unlink(wavFile, (err) => {
+            if (err) {
+                console.error(`Failed to delete ${wavFile}: ${err}`);
             }
         });
 
+        // Send the response with the base64-encoded audio data
+        res.json({
+            audio_data: audioData.toString('base64'),
+            duration: duration,
+            format: {
+                sampleRate: 44100,
+                channels: 1,
+                bitDepth: 16
+            }
+        });
     } catch (error) {
-        console.error("Server error:", error);
-        return res.status(500).json({ 
-            error: "Internal server error", 
-            details: error.message 
+        console.error('Error processing TTS request:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            details: error.message
         });
     }
 });

@@ -1,6 +1,3 @@
-console.log("Running on platform:", process.platform);
-
-
 const express = require('express');
 const bodyParser = require('body-parser');
 const { spawn } = require('child_process');
@@ -11,8 +8,7 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Configure paths - always use Linux style since we're in a container
-const tempDir = path.join(process.cwd(), 'tts_wav_output');
+const tempDir = path.join(process.cwd(), 'tts_output');
 
 // Create output directory
 try {
@@ -27,7 +23,37 @@ try {
 
 app.use(bodyParser.json());
 
-app.post('/api/tts', (req, res) => {
+// Add CORS headers that Roblox requires
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    next();
+});
+
+function convertToMp3(wavFile, mp3File) {
+    return new Promise((resolve, reject) => {
+        const ffmpeg = spawn('ffmpeg', [
+            '-i', wavFile,
+            '-acodec', 'libmp3lame',
+            '-ab', '128k',
+            '-ar', '44100',
+            mp3File
+        ]);
+
+        ffmpeg.on('close', (code) => {
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(new Error(`FFmpeg exited with code ${code}`));
+            }
+        });
+
+        ffmpeg.on('error', reject);
+    });
+}
+
+app.post('/api/tts', async (req, res) => {
     try {
         if (!req.body || !req.body.text) {
             return res.status(400).json({ error: 'Missing required field: text' });
@@ -35,32 +61,28 @@ app.post('/api/tts', (req, res) => {
 
         const { text, voice = 'en', speed = 175 } = req.body;
         const audio_id = crypto.randomBytes(16).toString('hex');
-        const outputFile = path.join(tempDir, `audio_${audio_id}.wav`);
+        const wavFile = path.join(tempDir, `audio_${audio_id}.wav`);
+        const mp3File = path.join(tempDir, `audio_${audio_id}.mp3`);
 
-        // Clean up any existing file
-        if (fs.existsSync(outputFile)) {
-            fs.unlinkSync(outputFile);
-        }
+        // Clean up any existing files
+        [wavFile, mp3File].forEach(file => {
+            if (fs.existsSync(file)) {
+                fs.unlinkSync(file);
+            }
+        });
 
         const args = [
             '-v', voice,
             '-s', speed.toString(),
             text,
-            '-w', outputFile
+            '-w', wavFile
         ];
 
         console.log('Executing command: espeak', args.join(' '));
 
-        // Use 'espeak' directly without Windows path
         const espeak = spawn('espeak', args);
 
         let errorOutput = '';
-        let standardOutput = '';
-
-        espeak.stdout.on('data', (data) => {
-            standardOutput += data;
-            console.log(`stdout: ${data}`);
-        });
 
         espeak.stderr.on('data', (data) => {
             errorOutput += data;
@@ -75,35 +97,36 @@ app.post('/api/tts', (req, res) => {
             });
         });
 
-        espeak.on('close', (code) => {
-            console.log(`Process exited with code ${code}`);
-            
-            setTimeout(() => {
-                try {
-                    if (fs.existsSync(outputFile)) {
-                        const stats = fs.statSync(outputFile);
-                        if (stats.size > 0) {
-                            return res.json({
-                                audio_id: audio_id,
-                                duration: (stats.size / (22050 * 2)) || 1,
-                                file_size: stats.size
-                            });
-                        } else {
-                            throw new Error('Output file is empty');
-                        }
-                    } else {
-                        throw new Error('Output file was not created');
-                    }
-                } catch (error) {
-                    console.error('Error checking output file:', error);
-                    return res.status(500).json({
-                        error: error.message,
-                        command: `espeak ${args.join(' ')}`,
-                        stderr: errorOutput,
-                        stdout: standardOutput
-                    });
-                }
-            }, 1000);
+        espeak.on('close', async (code) => {
+            if (code !== 0) {
+                return res.status(500).json({
+                    error: 'eSpeak failed',
+                    details: errorOutput
+                });
+            }
+
+            try {
+                // Convert WAV to MP3
+                await convertToMp3(wavFile, mp3File);
+
+                // Get file stats for duration calculation
+                const stats = fs.statSync(mp3File);
+                
+                // Clean up WAV file
+                fs.unlinkSync(wavFile);
+
+                res.json({
+                    audio_id: audio_id,
+                    duration: (stats.size / (44100 * 128/8)) || 1, // Rough duration estimate
+                    file_size: stats.size
+                });
+            } catch (error) {
+                console.error('Conversion error:', error);
+                res.status(500).json({
+                    error: 'Audio conversion failed',
+                    details: error.message
+                });
+            }
         });
 
     } catch (error) {
@@ -116,15 +139,15 @@ app.post('/api/tts', (req, res) => {
 });
 
 app.get('/audio/:id', (req, res) => {
-    const audioFile = path.join(tempDir, `audio_${req.params.id}.wav`);
-    if (fs.existsSync(audioFile)) {
-        res.type('audio/wav');  // Explicitly set the MIME type
-        res.sendFile(audioFile);
+    const mp3File = path.join(tempDir, `audio_${req.params.id}.mp3`);
+    if (fs.existsSync(mp3File)) {
+        res.header('Content-Type', 'audio/mpeg');
+        res.header('Content-Disposition', 'attachment');
+        res.sendFile(mp3File);
     } else {
         res.status(404).json({ error: "Audio file not found" });
     }
 });
-
 
 app.listen(port, () => {
     console.log(`eSpeak TTS server listening on port ${port}`);

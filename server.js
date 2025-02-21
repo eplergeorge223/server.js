@@ -3,20 +3,16 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Use express.json() to parse JSON bodies
 app.use(express.json());
 
-// Create a temporary directory for audio output if it doesn't exist
 const tempDir = path.join(process.cwd(), 'tts_wav_output');
 if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
 }
 
-// Set CORS headers for Roblox clients
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -24,7 +20,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// Wrap the espeak process in a promise
 function runEspeak(args) {
     return new Promise((resolve, reject) => {
         const espeak = spawn('espeak', args);
@@ -42,20 +37,21 @@ function runEspeak(args) {
     });
 }
 
-// Convert WAV file to raw PCM data using FFmpeg
 function convertToRawPCM(wavFile) {
     return new Promise((resolve, reject) => {
         const ffmpeg = spawn('ffmpeg', [
             '-i', wavFile,
-            '-f', 's16le',   // 16-bit signed little-endian
+            '-f', 's16le',
             '-acodec', 'pcm_s16le',
-            '-ar', '44100',  // Sample rate
-            '-ac', '1',      // Mono
-            '-'              // Output to stdout
+            '-ar', '44100',
+            '-ac', '1',
+            '-'
         ]);
+        
         const chunks = [];
         ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
         ffmpeg.stderr.on('data', (data) => console.error(`FFmpeg stderr: ${data}`));
+        
         ffmpeg.on('close', (code) => {
             if (code === 0) {
                 resolve(Buffer.concat(chunks));
@@ -74,7 +70,7 @@ app.post('/api/tts', async (req, res) => {
             return res.status(400).json({ error: 'Missing required field: text' });
         }
         
-        // Create a unique hash for the WAV filename
+        // Create a unique hash for both the audio_id and filename
         const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
         const wavFile = path.join(tempDir, `audio_${hash}.wav`);
         const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
@@ -84,17 +80,21 @@ app.post('/api/tts', async (req, res) => {
         
         // Convert the generated WAV file to raw PCM data
         const audioData = await convertToRawPCM(wavFile);
-        const duration = audioData.length / (44100 * 2); // 2 bytes per sample
+        
+        // Get file size before deletion
+        const fileSize = fs.statSync(wavFile).size;
         
         // Clean up the WAV file asynchronously
         fs.unlink(wavFile, (err) => {
             if (err) console.error(`Failed to delete ${wavFile}: ${err}`);
         });
         
-        // Return the full audio data as a base64-encoded string
+        // Match the expected response format
         res.json({
+            audio_id: hash,
             audio_data: audioData.toString('base64'),
-            duration: duration,
+            duration: audioData.length / (44100 * 2), // 2 bytes per sample
+            file_size: fileSize,
             format: {
                 sampleRate: 44100,
                 channels: 1,
@@ -113,4 +113,3 @@ app.post('/api/tts', async (req, res) => {
 app.listen(port, () => {
     console.log(`eSpeak TTS server listening on port ${port}`);
 });
-

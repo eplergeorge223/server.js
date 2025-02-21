@@ -60,12 +60,28 @@ app.post('/api/tts', async (req, res) => {
         }
 
         const { text, voice = 'en', speed = 175 } = req.body;
-        const audio_id = crypto.randomBytes(16).toString('hex');
+
+        // Generate a deterministic hash from the text, voice, and speed
+        const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
+        const audio_id = hash; // use the hash as the audio identifier
         const wavFile = path.join(tempDir, `audio_${audio_id}.wav`);
         const mp3File = path.join(tempDir, `audio_${audio_id}.mp3`);
 
-        // Clean up any existing files
-        [wavFile, mp3File].forEach(file => {
+        // If the MP3 already exists, return it immediately
+        if (fs.existsSync(mp3File)) {
+            console.log(`Audio for "${text}" already exists. Returning cached version.`);
+            const stats = fs.statSync(mp3File);
+            return res.json({
+                audio_id: audio_id,
+                // Using file size and known encoding parameters to roughly estimate duration
+                duration: (stats.size / (44100 * (128 / 8))) || 1,
+                file_size: stats.size
+            });
+        }
+
+        // Otherwise, generate new audio
+        // Clean up any existing temporary files (if any)
+        [wavFile].forEach(file => {
             if (fs.existsSync(file)) {
                 fs.unlinkSync(file);
             }
@@ -112,12 +128,12 @@ app.post('/api/tts', async (req, res) => {
                 // Get file stats for duration calculation
                 const stats = fs.statSync(mp3File);
                 
-                // Clean up WAV file
+                // Clean up WAV file now that MP3 is ready
                 fs.unlinkSync(wavFile);
 
                 res.json({
                     audio_id: audio_id,
-                    duration: (stats.size / (44100 * 128/8)) || 1, // Rough duration estimate
+                    duration: (stats.size / (44100 * (128 / 8))) || 1,
                     file_size: stats.size
                 });
             } catch (error) {

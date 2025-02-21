@@ -23,7 +23,7 @@ try {
 
 app.use(bodyParser.json());
 
-// Add CORS headers that Roblox requires
+// Add CORS headers that Roblox requires for all responses
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -61,26 +61,25 @@ app.post('/api/tts', async (req, res) => {
 
         const { text, voice = 'en', speed = 175 } = req.body;
 
-        // Generate a deterministic hash from the text, voice, and speed
+        // Generate a deterministic hash from the text, voice, and speed.
         const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
-        const audio_id = hash; // use the hash as the audio identifier
+        const audio_id = hash; // Use the hash as the audio identifier.
         const wavFile = path.join(tempDir, `audio_${audio_id}.wav`);
         const mp3File = path.join(tempDir, `audio_${audio_id}.mp3`);
 
-        // If the MP3 already exists, return it immediately
+        // If the MP3 already exists, return it immediately.
         if (fs.existsSync(mp3File)) {
             console.log(`Audio for "${text}" already exists. Returning cached version.`);
             const stats = fs.statSync(mp3File);
             return res.json({
                 audio_id: audio_id,
-                // Using file size and known encoding parameters to roughly estimate duration
                 duration: (stats.size / (44100 * (128 / 8))) || 1,
                 file_size: stats.size
             });
         }
 
-        // Otherwise, generate new audio
-        // Clean up any existing temporary files (if any)
+        // Otherwise, generate new audio.
+        // Clean up any existing temporary WAV file (if any).
         [wavFile].forEach(file => {
             if (fs.existsSync(file)) {
                 fs.unlinkSync(file);
@@ -122,13 +121,13 @@ app.post('/api/tts', async (req, res) => {
             }
 
             try {
-                // Convert WAV to MP3
+                // Convert WAV to MP3.
                 await convertToMp3(wavFile, mp3File);
 
-                // Get file stats for duration calculation
+                // Get file stats for duration calculation.
                 const stats = fs.statSync(mp3File);
                 
-                // Clean up WAV file now that MP3 is ready
+                // Clean up WAV file now that MP3 is ready.
                 fs.unlinkSync(wavFile);
 
                 res.json({
@@ -157,8 +156,10 @@ app.post('/api/tts', async (req, res) => {
 app.get('/audio/:id', (req, res) => {
     const mp3File = path.join(tempDir, `audio_${req.params.id}.mp3`);
     if (fs.existsSync(mp3File)) {
+        // Set required headers for Roblox compatibility.
         res.header('Content-Type', 'audio/mpeg');
         res.header('Content-Disposition', 'attachment');
+        res.header('Cache-Control', 'public, max-age=31536000');
         res.sendFile(mp3File);
     } else {
         res.status(404).json({ error: "Audio file not found" });

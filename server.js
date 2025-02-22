@@ -107,7 +107,7 @@ function convertToMp3(wavFile, mp3File) {
     });
 }
 
-// Updated Roblox audio upload function using the new POST /v1/audio endpoint
+// Updated Roblox audio upload function using the new POST /v1/audio endpoint with XSRF token handling
 async function uploadAudioToRoblox(audioPath) {
     if (!ROBLOX_API_KEY) {
         throw new Error('ROBLOX_API_KEY not configured');
@@ -139,42 +139,54 @@ async function uploadAudioToRoblox(audioPath) {
         creatorId: ROBLOX_CREATOR_ID
     });
 
-    try {
-        const response = await fetch('https://publish.roblox.com/v1/audio', {
+    // Helper function to perform the upload request with a given XSRF token
+    async function makeUploadRequest(xsrfToken) {
+        return await fetch('https://publish.roblox.com/v1/audio', {
             method: 'POST',
             headers: {
                 'x-api-key': ROBLOX_API_KEY,
+                'x-csrf-token': xsrfToken,
                 ...form.getHeaders()
             },
             body: form
         });
-
-        const responseText = await response.text();
-        console.log('Roblox API Response:', {
-            status: response.status,
-            statusText: response.statusText,
-            headers: response.headers.raw(),
-            body: responseText
-        });
-
-        if (!response.ok) {
-            let errorDetails;
-            try {
-                errorDetails = JSON.parse(responseText);
-            } catch (e) {
-                errorDetails = responseText;
-            }
-            throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
-        }
-
-        // Parse the JSON response to extract asset details
-        const data = JSON.parse(responseText);
-        console.log('Roblox upload successful:', data);
-        return data.id || data.assetId;
-    } catch (error) {
-        console.error('Upload error details:', error);
-        throw error;
     }
+
+    // First attempt with an empty XSRF token
+    let response = await makeUploadRequest('');
+    
+    // If forbidden, try to extract the XSRF token and retry
+    if (response.status === 403) {
+        const newXsrfToken = response.headers.get('x-csrf-token');
+        if (!newXsrfToken) {
+            throw new Error('XSRF token invalid and none provided in response');
+        }
+        console.log('Retrieved new XSRF token, retrying upload...');
+        response = await makeUploadRequest(newXsrfToken);
+    }
+
+    const responseText = await response.text();
+    console.log('Roblox API Response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers.raw(),
+        body: responseText
+    });
+
+    if (!response.ok) {
+        let errorDetails;
+        try {
+            errorDetails = JSON.parse(responseText);
+        } catch (e) {
+            errorDetails = responseText;
+        }
+        throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
+    }
+
+    // Parse the JSON response to extract asset details
+    const data = JSON.parse(responseText);
+    console.log('Roblox upload successful:', data);
+    return data.id || data.assetId;
 }
 
 // Serve audio files statically
@@ -358,3 +370,4 @@ process.on('uncaughtException', (error) => {
         process.exit(1);
     }
 });
+

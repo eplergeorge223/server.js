@@ -38,7 +38,7 @@ function runEspeak(args) {
         console.log('Executing command: espeak', args.join(' '));
         const espeak = spawn('espeak', args);
         let errorOutput = '';
-        
+
         espeak.stderr.on('data', (data) => {
             errorOutput += data;
             console.log('eSpeak stderr:', data.toString());
@@ -67,7 +67,7 @@ function runEspeak(args) {
 function convertToMp3(wavFile, mp3File) {
     return new Promise((resolve, reject) => {
         console.log('Converting WAV to MP3:', wavFile, '->', mp3File);
-        
+
         const ffmpeg = spawn('ffmpeg', [
             '-i', wavFile,
             '-acodec', 'libmp3lame',
@@ -107,8 +107,8 @@ function convertToMp3(wavFile, mp3File) {
     });
 }
 
-// Fixed Roblox upload function
-async function uploadToRoblox(audioPath) {
+// Updated Roblox audio upload function using the new POST /v1/audio endpoint
+async function uploadAudioToRoblox(audioPath) {
     if (!ROBLOX_API_KEY) {
         throw new Error('ROBLOX_API_KEY not configured');
     }
@@ -116,7 +116,6 @@ async function uploadToRoblox(audioPath) {
         throw new Error('ROBLOX_CREATOR_ID not configured');
     }
 
-    // Verify file exists and is readable
     if (!fs.existsSync(audioPath)) {
         throw new Error(`Audio file not found: ${audioPath}`);
     }
@@ -127,21 +126,21 @@ async function uploadToRoblox(audioPath) {
     }
 
     const form = new FormData();
-    
-    // Use fileContent as required by Roblox API
+    // The new API expects a file stream under the key "fileContent"
     form.append('fileContent', fs.createReadStream(audioPath));
+    // Add additional required fields. Adjust field names if needed.
+    form.append('displayName', path.basename(audioPath, '.mp3'));
     form.append('creatorId', ROBLOX_CREATOR_ID);
     form.append('assetType', 'Audio');
-    form.append('displayName', path.basename(audioPath, '.mp3'));
-    
-    console.log('Uploading to Roblox:', {
+
+    console.log('Uploading to Roblox using new /v1/audio endpoint:', {
         fileName: path.basename(audioPath),
         fileSize: fileStats.size,
         creatorId: ROBLOX_CREATOR_ID
     });
 
     try {
-        const response = await fetch('https://apis.roblox.com/assets/v1/assets', {
+        const response = await fetch('https://publish.roblox.com/v1/audio', {
             method: 'POST',
             headers: {
                 'x-api-key': ROBLOX_API_KEY,
@@ -168,9 +167,10 @@ async function uploadToRoblox(audioPath) {
             throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
         }
 
+        // Parse the JSON response to extract asset details
         const data = JSON.parse(responseText);
         console.log('Roblox upload successful:', data);
-        return data.id;
+        return data.id || data.assetId;
     } catch (error) {
         console.error('Upload error details:', error);
         throw error;
@@ -263,14 +263,14 @@ app.post('/api/upload-to-roblox', async (req, res) => {
         }
 
         console.log('Processing Roblox upload request for audio:', audioId);
-        const robloxAssetId = await uploadToRoblox(mp3File);
+        const robloxAssetId = await uploadAudioToRoblox(mp3File);
         
-        const response = {
+        const responseObj = {
             success: true,
             robloxAssetId: robloxAssetId
         };
-        console.log('Upload successful:', response);
-        res.json(response);
+        console.log('Upload successful:', responseObj);
+        res.json(responseObj);
 
     } catch (error) {
         console.error('Roblox upload error:', error);

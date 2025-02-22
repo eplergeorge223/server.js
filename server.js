@@ -14,18 +14,6 @@ const ROBLOX_CREATOR_ID = process.env.ROBLOX_CREATOR_ID;
 const MAX_AUDIO_SIZE = 20 * 1024 * 1024; // 20MB limit
 const CLEANUP_INTERVAL = 3600000; // 1 hour in milliseconds
 
-// Validation function for environment variables
-function validateConfig() {
-    const missing = [];
-    if (!ROBLOX_API_KEY) missing.push('ROBLOX_API_KEY');
-    if (!ROBLOX_CREATOR_ID) missing.push('ROBLOX_CREATOR_ID');
-    if (missing.length > 0) {
-        console.warn(`Warning: Missing environment variables: ${missing.join(', ')}`);
-        return false;
-    }
-    return true;
-}
-
 // Initialize Express middleware
 app.use(express.json());
 
@@ -44,17 +32,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// Enhanced error handling middleware
-app.use((err, req, res, next) => {
-    console.error('Server error:', err);
-    res.status(500).json({
-        error: 'Internal server error',
-        message: err.message,
-        stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-});
-
-// Improved espeak function with more robust error handling
+// Improved espeak function
 function runEspeak(args) {
     return new Promise((resolve, reject) => {
         console.log('Executing command: espeak', args.join(' '));
@@ -95,27 +73,30 @@ function convertToMp3(wavFile, mp3File) {
             '-acodec', 'libmp3lame',
             '-ab', '128k',
             '-ar', '44100',
-            '-y', // Overwrite output file if it exists
+            '-y',
             mp3File
         ]);
 
         let errorOutput = '';
+        let outputLog = '';
 
         ffmpeg.stderr.on('data', (data) => {
-            errorOutput += data;
-            console.log('FFmpeg stderr:', data.toString());
+            const message = data.toString();
+            errorOutput += message;
+            console.log('FFmpeg stderr:', message);
+        });
+
+        ffmpeg.stdout.on('data', (data) => {
+            outputLog += data.toString();
+            console.log('FFmpeg stdout:', data.toString());
         });
 
         ffmpeg.on('close', (code) => {
-            if (code === 0) {
-                // Verify the output file exists and has size
-                if (fs.existsSync(mp3File) && fs.statSync(mp3File).size > 0) {
-                    resolve();
-                } else {
-                    reject(new Error('FFmpeg conversion failed: Output file is empty or missing'));
-                }
+            console.log('FFmpeg conversion complete with code:', code);
+            if (code === 0 && fs.existsSync(mp3File) && fs.statSync(mp3File).size > 0) {
+                resolve();
             } else {
-                reject(new Error(`FFmpeg exited with code ${code}: ${errorOutput}`));
+                reject(new Error(`FFmpeg conversion failed (code ${code}): ${errorOutput}`));
             }
         });
 
@@ -126,10 +107,18 @@ function convertToMp3(wavFile, mp3File) {
     });
 }
 
-// Improved Roblox upload function
+// Fixed Roblox upload function
 async function uploadToRoblox(audioPath) {
-    if (!validateConfig()) {
-        throw new Error('Missing required Roblox configuration');
+    if (!ROBLOX_API_KEY) {
+        throw new Error('ROBLOX_API_KEY not configured');
+    }
+    if (!ROBLOX_CREATOR_ID) {
+        throw new Error('ROBLOX_CREATOR_ID not configured');
+    }
+
+    // Verify file exists and is readable
+    if (!fs.existsSync(audioPath)) {
+        throw new Error(`Audio file not found: ${audioPath}`);
     }
 
     const fileStats = fs.statSync(audioPath);
@@ -139,12 +128,18 @@ async function uploadToRoblox(audioPath) {
 
     const form = new FormData();
     
-    // Add required fields
-    form.append('file', fs.createReadStream(audioPath));
+    // Use fileContent as required by Roblox API
+    form.append('fileContent', fs.createReadStream(audioPath));
     form.append('creatorId', ROBLOX_CREATOR_ID);
     form.append('assetType', 'Audio');
     form.append('displayName', path.basename(audioPath, '.mp3'));
     
+    console.log('Uploading to Roblox:', {
+        fileName: path.basename(audioPath),
+        fileSize: fileStats.size,
+        creatorId: ROBLOX_CREATOR_ID
+    });
+
     try {
         const response = await fetch('https://apis.roblox.com/assets/v1/assets', {
             method: 'POST',
@@ -155,17 +150,26 @@ async function uploadToRoblox(audioPath) {
             body: form
         });
 
+        const responseText = await response.text();
+        console.log('Roblox API Response:', {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers.raw(),
+            body: responseText
+        });
+
         if (!response.ok) {
-            let errorText = await response.text();
+            let errorDetails;
             try {
-                errorText = JSON.parse(errorText);
+                errorDetails = JSON.parse(responseText);
             } catch (e) {
-                // If it's not JSON, use the text as-is
+                errorDetails = responseText;
             }
-            throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorText)}`);
+            throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
         }
 
-        const data = await response.json();
+        const data = JSON.parse(responseText);
+        console.log('Roblox upload successful:', data);
         return data.id;
     } catch (error) {
         console.error('Upload error details:', error);
@@ -173,36 +177,34 @@ async function uploadToRoblox(audioPath) {
     }
 }
 
-// Serve audio files statically with caching headers
-app.use('/audio', (req, res, next) => {
-    res.header('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
-    express.static(audioDir)(req, res, next);
-});
+// Serve audio files statically
+app.use('/audio', express.static(audioDir));
 
-// Main TTS endpoint with improved error handling and validation
+// Main TTS endpoint
 app.post('/api/tts', async (req, res) => {
     try {
         const { text, voice = 'en', speed = 175 } = req.body;
         
-        // Input validation
         if (!text) {
             return res.status(400).json({ error: 'Missing required field: text' });
         }
         if (text.length > 1000) {
             return res.status(400).json({ error: 'Text exceeds maximum length of 1000 characters' });
         }
-        if (speed < 80 || speed > 500) {
-            return res.status(400).json({ error: 'Speed must be between 80 and 500' });
-        }
         
-        // Create a unique hash for the audio
         const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
         const wavFile = path.join(audioDir, `${hash}.wav`);
         const mp3File = path.join(audioDir, `${hash}.mp3`);
         
-        // Check for existing MP3
+        console.log('Processing TTS request:', {
+            text,
+            voice,
+            speed,
+            hash
+        });
+
         if (fs.existsSync(mp3File)) {
-            console.log(`Audio for "${text}" already exists as MP3. Returning cached version.`);
+            console.log(`Audio cache hit for "${text}"`);
             const stats = fs.statSync(mp3File);
             const duration = (stats.size / (44100 * (128/8))) || 1;
             const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -214,14 +216,14 @@ app.post('/api/tts', async (req, res) => {
             });
         }
         
-        // Generate new audio file
+        console.log('Generating new audio file');
         const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
         await runEspeak(args);
         await convertToMp3(wavFile, mp3File);
         
-        // Clean up WAV file
         if (fs.existsSync(wavFile)) {
             fs.unlinkSync(wavFile);
+            console.log('Cleaned up WAV file:', wavFile);
         }
         
         const stats = fs.statSync(mp3File);
@@ -247,7 +249,7 @@ app.post('/api/tts', async (req, res) => {
     }
 });
 
-// Improved Roblox upload endpoint
+// Roblox upload endpoint
 app.post('/api/upload-to-roblox', async (req, res) => {
     try {
         const { audioId } = req.body;
@@ -260,12 +262,15 @@ app.post('/api/upload-to-roblox', async (req, res) => {
             return res.status(404).json({ error: 'Audio file not found' });
         }
 
+        console.log('Processing Roblox upload request for audio:', audioId);
         const robloxAssetId = await uploadToRoblox(mp3File);
         
-        res.json({
+        const response = {
             success: true,
             robloxAssetId: robloxAssetId
-        });
+        };
+        console.log('Upload successful:', response);
+        res.json(response);
 
     } catch (error) {
         console.error('Roblox upload error:', error);
@@ -276,7 +281,7 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     }
 });
 
-// Improved cleanup endpoint with better file handling
+// Cleanup endpoint
 app.post('/api/cleanup', (req, res) => {
     try {
         const files = fs.readdirSync(audioDir);
@@ -291,8 +296,10 @@ app.post('/api/cleanup', (req, res) => {
                 if (now - stats.mtimeMs > CLEANUP_INTERVAL) {
                     fs.unlinkSync(filePath);
                     cleaned++;
+                    console.log('Cleaned up file:', filePath);
                 }
             } catch (error) {
+                console.error('Error cleaning up file:', file, error);
                 errors.push({ file, error: error.message });
             }
         });
@@ -302,54 +309,51 @@ app.post('/api/cleanup', (req, res) => {
             errors: errors.length > 0 ? errors : undefined
         });
     } catch (error) {
+        console.error('Cleanup error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Enhanced health check endpoint
+// Health check endpoint
 app.get('/health', (req, res) => {
-    const diskSpace = fs.statSync(audioDir);
-    res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        audioDir: audioDir,
-        audioDirExists: fs.existsSync(audioDir),
-        platform: process.platform,
-        files: fs.readdirSync(audioDir).length,
-        diskSpace: {
-            free: diskSpace.size,
-            used: diskSpace.blocks * diskSpace.blksize
-        },
-        robloxConfigured: validateConfig(),
-        version: process.env.npm_package_version || '1.0.0',
-        uptime: process.uptime()
-    });
+    try {
+        const diskSpace = fs.statSync(audioDir);
+        res.json({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            audioDir: audioDir,
+            audioDirExists: fs.existsSync(audioDir),
+            platform: process.platform,
+            files: fs.readdirSync(audioDir).length,
+            diskSpace: {
+                free: diskSpace.size,
+                used: diskSpace.blocks * diskSpace.blksize
+            },
+            robloxConfigured: !!(ROBLOX_API_KEY && ROBLOX_CREATOR_ID),
+            version: process.env.npm_package_version || '1.0.0',
+            uptime: process.uptime()
+        });
+    } catch (error) {
+        console.error('Health check error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
-// Automatic cleanup every hour
-setInterval(() => {
-    console.log('Running automated cleanup...');
-    fetch(`http://localhost:${port}/api/cleanup`, { method: 'POST' })
-        .catch(error => console.error('Automated cleanup failed:', error));
-}, CLEANUP_INTERVAL);
-
-// Start server
+// Handle startup
 app.listen(port, () => {
     console.log('Running on platform:', process.platform);
     console.log(`eSpeak TTS server listening on port ${port}`);
-    console.log('Roblox API integration:', validateConfig() ? 'Configured' : 'Not configured');
+    console.log('Roblox API integration:', ROBLOX_API_KEY && ROBLOX_CREATOR_ID ? 'Configured' : 'Not configured');
 });
 
-// Handle process termination gracefully
+// Handle process termination
 process.on('SIGTERM', () => {
     console.log('SIGTERM received. Cleaning up...');
-    // Perform any necessary cleanup
     process.exit(0);
 });
 
 process.on('uncaughtException', (error) => {
     console.error('Uncaught exception:', error);
-    // Log error and exit if it's fatal
     if (error.fatal) {
         process.exit(1);
     }

@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const FormData = require('form-data');
+const retry = require('retry');
 const app = express();
 
 // Configuration
@@ -13,7 +14,9 @@ const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
 const ROBLOX_CREATOR_ID = process.env.ROBLOX_CREATOR_ID;
 const MAX_AUDIO_SIZE = 20 * 1024 * 1024; // 20MB limit
 const CLEANUP_INTERVAL = 3600000; // 1 hour in milliseconds
-const RETRY_DELAY_MS = 2000; // Delay between retries (2 seconds)
+const MAX_RETRIES = 5;
+const INITIAL_RETRY_DELAY = 1000; // Start with 1 second
+const MAX_RETRY_DELAY = 10000; // Max 10 seconds
 
 // Initialize Express middleware
 app.use(express.json());
@@ -108,12 +111,12 @@ function convertToMp3(wavFile, mp3File) {
     });
 }
 
-// Helper delay function
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+// Helper delay function with exponential backoff
+function getRetryDelay(attempt) {
+    return Math.min(Math.pow(2, attempt) * INITIAL_RETRY_DELAY, MAX_RETRY_DELAY);
 }
 
-// Updated Roblox audio upload function using the new POST /v1/audio endpoint with XSRF token handling and retry logic for 408
+// Updated Roblox audio upload function with improved retry logic
 async function uploadAudioToRoblox(audioPath) {
     if (!ROBLOX_API_KEY) {
         throw new Error('ROBLOX_API_KEY not configured');
@@ -131,75 +134,117 @@ async function uploadAudioToRoblox(audioPath) {
         throw new Error(`File size ${fileStats.size} exceeds maximum allowed size of ${MAX_AUDIO_SIZE}`);
     }
 
-    const form = new FormData();
-    // The new API expects a file stream under the key "fileContent"
-    form.append('fileContent', fs.createReadStream(audioPath));
-    // Add additional required fields. Adjust field names if needed.
-    form.append('displayName', path.basename(audioPath, '.mp3'));
-    form.append('creatorId', ROBLOX_CREATOR_ID);
-    form.append('assetType', 'Audio');
-
-    console.log('Uploading to Roblox using new /v1/audio endpoint:', {
-        fileName: path.basename(audioPath),
-        fileSize: fileStats.size,
-        creatorId: ROBLOX_CREATOR_ID
+    // Create retry operation
+    const operation = retry.operation({
+        retries: MAX_RETRIES,
+        factor: 2,
+        minTimeout: INITIAL_RETRY_DELAY,
+        maxTimeout: MAX_RETRY_DELAY,
+        randomize: true,
     });
 
-    // Helper function to perform the upload request with a given XSRF token
-    async function makeUploadRequest(xsrfToken) {
-        return await fetch('https://publish.roblox.com/v1/audio', {
-            method: 'POST',
-            headers: {
-                'x-api-key': ROBLOX_API_KEY,
-                'x-csrf-token': xsrfToken,
-                ...form.getHeaders()
-            },
-            body: form
+    return new Promise((resolve, reject) => {
+        operation.attempt(async (currentAttempt) => {
+            try {
+                const form = new FormData();
+                // Use a fresh file stream for each attempt
+                form.append('fileContent', fs.createReadStream(audioPath));
+                form.append('displayName', path.basename(audioPath, '.mp3'));
+                form.append('creatorId', ROBLOX_CREATOR_ID);
+                form.append('assetType', 'Audio');
+
+                console.log(`Upload attempt ${currentAttempt}/${MAX_RETRIES} for file:`, {
+                    fileName: path.basename(audioPath),
+                    fileSize: fileStats.size,
+                    creatorId: ROBLOX_CREATOR_ID
+                });
+
+                let xsrfToken = '';
+                let response = await fetch('https://publish.roblox.com/v1/audio', {
+                    method: 'POST',
+                    headers: {
+                        'x-api-key': ROBLOX_API_KEY,
+                        'x-csrf-token': xsrfToken,
+                        ...form.getHeaders()
+                    },
+                    body: form,
+                    timeout: 30000 // 30 second timeout
+                });
+
+                // Handle XSRF token refresh
+                if (response.status === 403) {
+                    xsrfToken = response.headers.get('x-csrf-token');
+                    if (!xsrfToken) {
+                        throw new Error('XSRF token invalid and none provided in response');
+                    }
+                    console.log('Retrieved new XSRF token, retrying request...');
+                    
+                    // Create new form with fresh file stream
+                    const newForm = new FormData();
+                    newForm.append('fileContent', fs.createReadStream(audioPath));
+                    newForm.append('displayName', path.basename(audioPath, '.mp3'));
+                    newForm.append('creatorId', ROBLOX_CREATOR_ID);
+                    newForm.append('assetType', 'Audio');
+
+                    response = await fetch('https://publish.roblox.com/v1/audio', {
+                        method: 'POST',
+                        headers: {
+                            'x-api-key': ROBLOX_API_KEY,
+                            'x-csrf-token': xsrfToken,
+                            ...newForm.getHeaders()
+                        },
+                        body: newForm,
+                        timeout: 30000
+                    });
+                }
+
+                const responseText = await response.text();
+                console.log('Roblox API Response:', {
+                    attempt: currentAttempt,
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: response.headers.raw(),
+                    body: responseText
+                });
+
+                // Handle retryable errors
+                if (response.status === 408 || response.status === 500 || response.status === 503) {
+                    const error = new Error(`Roblox upload failed (${response.status}): ${response.statusText}`);
+                    error.response = response;
+                    error.responseText = responseText;
+                    throw error;
+                }
+
+                if (!response.ok) {
+                    let errorDetails;
+                    try {
+                        errorDetails = JSON.parse(responseText);
+                    } catch (e) {
+                        errorDetails = responseText;
+                    }
+                    const error = new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
+                    error.response = response;
+                    error.responseText = responseText;
+                    return reject(error);
+                }
+
+                const data = JSON.parse(responseText);
+                console.log('Roblox upload successful:', data);
+                resolve(data.id || data.assetId);
+
+            } catch (error) {
+                console.error(`Upload attempt ${currentAttempt} failed:`, error);
+                
+                if (operation.retry(error)) {
+                    const nextDelay = getRetryDelay(currentAttempt);
+                    console.log(`Retrying in ${nextDelay}ms...`);
+                    return;
+                }
+                
+                reject(operation.mainError());
+            }
         });
-    }
-
-    // First attempt with an empty XSRF token
-    let response = await makeUploadRequest('');
-    
-    // If forbidden, try to extract the XSRF token and retry.
-    if (response.status === 403) {
-        const newXsrfToken = response.headers.get('x-csrf-token');
-        if (!newXsrfToken) {
-            throw new Error('XSRF token invalid and none provided in response');
-        }
-        console.log('Retrieved new XSRF token, retrying upload...');
-        response = await makeUploadRequest(newXsrfToken);
-    }
-    
-    // If we receive a 408 (Request Timeout), wait and retry one more time.
-    if (response.status === 408) {
-        console.log('Received 408 (Request Timeout). Waiting and retrying...');
-        await delay(RETRY_DELAY_MS);
-        response = await makeUploadRequest(response.headers.get('x-csrf-token') || '');
-    }
-
-    const responseText = await response.text();
-    console.log('Roblox API Response:', {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers.raw(),
-        body: responseText
     });
-
-    if (!response.ok) {
-        let errorDetails;
-        try {
-            errorDetails = JSON.parse(responseText);
-        } catch (e) {
-            errorDetails = responseText;
-        }
-        throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
-    }
-
-    // Parse the JSON response to extract asset details
-    const data = JSON.parse(responseText);
-    console.log('Roblox upload successful:', data);
-    return data.id || data.assetId;
 }
 
 // Serve audio files statically

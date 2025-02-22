@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
+const FormData = require('form-data'); // Added for multipart/form-data support
 const app = express();
 const port = process.env.PORT || 8080;
 
@@ -74,23 +75,29 @@ function convertToMp3(wavFile, mp3File) {
     });
 }
 
-// Function to upload audio to Roblox
+// Function to upload audio to Roblox using multipart/form-data
 async function uploadToRoblox(audioPath) {
     if (!ROBLOX_API_KEY) {
         throw new Error('ROBLOX_API_KEY not configured');
     }
 
-    const audioData = fs.readFileSync(audioPath);
+    const form = new FormData();
+    // Append the file as a stream
+    form.append('file', fs.createReadStream(audioPath));
     
-const response = await fetch('https://apis.roblox.com/assets/v1/assets', {
-    method: 'POST',
-    headers: {
-        'x-api-key': ROBLOX_API_KEY,
-        'Content-Type': 'audio/mpeg',
-        'Accept': 'application/json'
-    },
-    body: audioData
-});
+    // If required by Roblox API, include additional fields
+    // form.append('creatorId', ROBLOX_CREATOR_ID);
+    // form.append('assetType', 'Audio');
+
+    const response = await fetch('https://apis.roblox.com/assets/v1/assets', {
+        method: 'POST',
+        headers: {
+            'x-api-key': ROBLOX_API_KEY,
+            // Merge form headers (includes the proper Content-Type with boundary)
+            ...form.getHeaders()
+        },
+        body: form
+    });
 
     if (!response.ok) {
         throw new Error(`Roblox upload failed: ${response.statusText}`);
@@ -147,14 +154,14 @@ app.post('/api/tts', async (req, res) => {
         const duration = (stats.size / (44100 * (128/8))) || 1;
         const baseUrl = `${req.protocol}://${req.get('host')}`;
         
-        const response = {
+        const responseObj = {
             audio_id: hash,
             duration: duration,
             file_size: stats.size,
             url: `${baseUrl}/audio/${hash}.mp3`
         };
-        console.log('Sending response:', response);
-        res.json(response);
+        console.log('Sending response:', responseObj);
+        res.json(responseObj);
         
     } catch (error) {
         console.error('TTS error:', error);

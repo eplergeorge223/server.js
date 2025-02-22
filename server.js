@@ -13,6 +13,7 @@ const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
 const ROBLOX_CREATOR_ID = process.env.ROBLOX_CREATOR_ID;
 const MAX_AUDIO_SIZE = 20 * 1024 * 1024; // 20MB limit
 const CLEANUP_INTERVAL = 3600000; // 1 hour in milliseconds
+const RETRY_DELAY_MS = 2000; // Delay between retries (2 seconds)
 
 // Initialize Express middleware
 app.use(express.json());
@@ -107,7 +108,12 @@ function convertToMp3(wavFile, mp3File) {
     });
 }
 
-// Updated Roblox audio upload function using the new POST /v1/audio endpoint with XSRF token handling
+// Helper delay function
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Updated Roblox audio upload function using the new POST /v1/audio endpoint with XSRF token handling and retry logic for 408
 async function uploadAudioToRoblox(audioPath) {
     if (!ROBLOX_API_KEY) {
         throw new Error('ROBLOX_API_KEY not configured');
@@ -155,7 +161,7 @@ async function uploadAudioToRoblox(audioPath) {
     // First attempt with an empty XSRF token
     let response = await makeUploadRequest('');
     
-    // If forbidden, try to extract the XSRF token and retry
+    // If forbidden, try to extract the XSRF token and retry.
     if (response.status === 403) {
         const newXsrfToken = response.headers.get('x-csrf-token');
         if (!newXsrfToken) {
@@ -163,6 +169,13 @@ async function uploadAudioToRoblox(audioPath) {
         }
         console.log('Retrieved new XSRF token, retrying upload...');
         response = await makeUploadRequest(newXsrfToken);
+    }
+    
+    // If we receive a 408 (Request Timeout), wait and retry one more time.
+    if (response.status === 408) {
+        console.log('Received 408 (Request Timeout). Waiting and retrying...');
+        await delay(RETRY_DELAY_MS);
+        response = await makeUploadRequest(response.headers.get('x-csrf-token') || '');
     }
 
     const responseText = await response.text();
@@ -370,4 +383,3 @@ process.on('uncaughtException', (error) => {
         process.exit(1);
     }
 });
-

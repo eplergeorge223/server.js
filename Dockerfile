@@ -14,6 +14,7 @@ COPY package*.json ./
 
 # Install dependencies
 RUN npm install
+RUN npm install express node-fetch
 
 # Copy source code
 COPY . .

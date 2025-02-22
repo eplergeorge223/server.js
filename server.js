@@ -15,6 +15,7 @@ if (!fs.existsSync(audioDir)) {
     console.log('Created audio storage folder:', audioDir);
 }
 
+// Set CORS headers
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -22,30 +23,49 @@ app.use((req, res, next) => {
     next();
 });
 
+// Function to run espeak and generate a WAV file.
 function runEspeak(args) {
     return new Promise((resolve, reject) => {
-        console.log('Executing command:', 'espeak', args.join(' '));
+        console.log('Executing command: espeak', args.join(' '));
         const espeak = spawn('espeak', args);
-        
         let errorOutput = '';
-        
         espeak.stderr.on('data', (data) => {
             errorOutput += data;
             console.log('eSpeak stderr:', data.toString());
         });
-        
         espeak.on('close', (code) => {
-            console.log(`Process exited with code ${code}`);
+            console.log(`espeak exited with code ${code}`);
             if (code !== 0) {
                 return reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
             }
             resolve();
         });
-        
         espeak.on('error', (error) => {
             console.error('eSpeak process error:', error);
             reject(error);
         });
+    });
+}
+
+// Function to convert a WAV file to MP3 using FFmpeg.
+function convertToMp3(wavFile, mp3File) {
+    return new Promise((resolve, reject) => {
+        console.log('Converting WAV to MP3:', wavFile, '->', mp3File);
+        const ffmpeg = spawn('ffmpeg', [
+            '-i', wavFile,
+            '-acodec', 'libmp3lame',
+            '-ab', '128k',
+            '-ar', '44100',
+            mp3File
+        ]);
+        ffmpeg.on('close', (code) => {
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(new Error(`FFmpeg exited with code ${code}`));
+            }
+        });
+        ffmpeg.on('error', reject);
     });
 }
 
@@ -59,35 +79,51 @@ app.post('/api/tts', async (req, res) => {
             return res.status(400).json({ error: 'Missing required field: text' });
         }
         
-        // Create a unique hash for the audio
+        // Create a unique hash for the audio.
         const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
         const wavFile = path.join(audioDir, `${hash}.wav`);
+        const mp3File = path.join(audioDir, `${hash}.mp3`);
         
-        // Check if file already exists
+        // If MP3 already exists, return it.
+        if (fs.existsSync(mp3File)) {
+            console.log(`Audio for "${text}" already exists as MP3. Returning cached version.`);
+            const stats = fs.statSync(mp3File);
+            // Duration calculation here is a rough estimate.
+            const duration = (stats.size / (44100 * (128/8))) || 1;
+            const baseUrl = `${req.protocol}://${req.get('host')}`;
+            return res.json({
+                audio_id: hash,
+                duration: duration,
+                file_size: stats.size,
+                url: `${baseUrl}/audio/${hash}.mp3`
+            });
+        }
+        
+        // If MP3 doesn't exist, generate the WAV file first.
         if (!fs.existsSync(wavFile)) {
-            // Generate WAV file
             const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
             await runEspeak(args);
         }
         
-        // Get file stats
-        const stats = fs.statSync(wavFile);
-        const fileSize = stats.size;
+        // Convert the WAV file to MP3.
+        await convertToMp3(wavFile, mp3File);
         
-        // Calculate duration (assuming 44.1kHz, 16-bit, mono)
-        const headerSize = 44; // WAV header size
-        const duration = (fileSize - headerSize) / (44100 * 2);
+        // Remove the WAV file after conversion.
+        if (fs.existsSync(wavFile)) {
+            fs.unlinkSync(wavFile);
+        }
         
-        // Get the base URL from the request
+        // Get MP3 file stats.
+        const stats = fs.statSync(mp3File);
+        const duration = (stats.size / (44100 * (128/8))) || 1;
         const baseUrl = `${req.protocol}://${req.get('host')}`;
         
         const response = {
             audio_id: hash,
             duration: duration,
-            file_size: fileSize,
-            url: `${baseUrl}/audio/${hash}.wav`
+            file_size: stats.size,
+            url: `${baseUrl}/audio/${hash}.mp3`
         };
-        
         console.log('Sending response:', response);
         res.json(response);
         
@@ -100,30 +136,28 @@ app.post('/api/tts', async (req, res) => {
     }
 });
 
-// Add file cleanup endpoint (optional, for maintenance)
+// Optional endpoint to clean up old files.
 app.post('/api/cleanup', (req, res) => {
     try {
         const files = fs.readdirSync(audioDir);
         const now = Date.now();
         let cleaned = 0;
-        
         files.forEach(file => {
             const filePath = path.join(audioDir, file);
             const stats = fs.statSync(filePath);
-            // Remove files older than 1 hour
+            // Remove files older than 1 hour.
             if (now - stats.mtimeMs > 3600000) {
                 fs.unlinkSync(filePath);
                 cleaned++;
             }
         });
-        
         res.json({ message: `Cleaned up ${cleaned} files` });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// Health check endpoint
+// Health check endpoint.
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',

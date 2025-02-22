@@ -82,14 +82,15 @@ async function uploadToRoblox(audioPath) {
 
     const audioData = fs.readFileSync(audioPath);
     
-    const response = await fetch('https://apis.roblox.com/assets/v1/assets', {
-        method: 'POST',
-        headers: {
-            'x-api-key': ROBLOX_API_KEY,
-            'Content-Type': 'audio/mpeg'
-        },
-        body: audioData
-    });
+const response = await fetch('https://apis.roblox.com/assets/v1/assets', {
+    method: 'POST',
+    headers: {
+        'x-api-key': ROBLOX_API_KEY,
+        'Content-Type': 'audio/mpeg',
+        'Accept': 'application/json'
+    },
+    body: audioData
+});
 
     if (!response.ok) {
         throw new Error(`Roblox upload failed: ${response.statusText}`);

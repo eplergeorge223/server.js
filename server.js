@@ -10,7 +10,7 @@ const app = express();
 // Configuration
 const port = process.env.PORT || 8080;
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
-const ROBLOX_CREATOR_ID = process.env.ROBLOX_CREATOR_ID;
+const ROBLOX_CREATOR_ID = profmcess.env.ROBLOX_CREATOR_ID;
 const MAX_AUDIO_SIZE = 20 * 1024 * 1024; // 20MB limit
 const CLEANUP_INTERVAL = 3600000; // 1 hour in milliseconds
 const RETRY_DELAY_MS = 2000; // Delay between retries (2 seconds)
@@ -115,37 +115,131 @@ function delay(ms) {
 return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Updated Roblox audio upload function using the new POST /v1/audio endpoint with XSRF token handling and retry logic for 408
-async function uploadAudioToRoblox(audioPath) {
-if (!ROBLOX_API_KEY) {
-throw new Error('ROBLOX_API_KEY not configured');
+// Function to handle Roblox upload with multiple retries
+async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
+    if (!ROBLOX_API_KEY) {
+        throw new Error('ROBLOX_API_KEY not configured');
+    }
+    if (!ROBLOX_CREATOR_ID) {
+        throw new Error('ROBLOX_CREATOR_ID not configured');
+    }
+
+    if (!fs.existsSync(audioPath)) {
+        throw new Error(`Audio file not found: ${audioPath}`);
+    }
+
+    const fileStats = fs.statSync(audioPath);
+    if (fileStats.size > MAX_AUDIO_SIZE) {
+        throw new Error(`File size ${fileStats.size} exceeds maximum allowed size of ${MAX_AUDIO_SIZE}`);
+    }
+
+    let lastError = null;
+    let xsrfToken = '';
+
+    // Try multiple times with increasing delays
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const form = new FormData();
+            form.append('fileContent', fs.createReadStream(audioPath));
+            form.append('displayName', path.basename(audioPath, '.mp3'));
+            form.append('creatorId', ROBLOX_CREATOR_ID);
+            form.append('assetType', 'Audio');
+
+            console.log(`Upload attempt ${attempt}/${maxRetries}:`, {
+                fileName: path.basename(audioPath),
+                fileSize: fileStats.size,
+                creatorId: ROBLOX_CREATOR_ID
+            });
+
+            const response = await fetch('https://publish.roblox.com/v1/audio', {
+                method: 'POST',
+                headers: {
+                    'x-api-key': ROBLOX_API_KEY,
+                    'x-csrf-token': xsrfToken,
+                    ...form.getHeaders()
+                },
+                body: form,
+                timeout: 30000 // 30 second timeout
+            });
+
+            // If we get a 403, try to get a new XSRF token
+            if (response.status === 403) {
+                xsrfToken = response.headers.get('x-csrf-token');
+                if (!xsrfToken) {
+                    throw new Error('Failed to get XSRF token');
+                }
+                console.log('Retrieved new XSRF token, retrying...');
+                continue;
+            }
+
+            // If we get a timeout or 5xx error, retry
+            if (response.status === 408 || (response.status >= 500 && response.status < 600)) {
+                const delay = attempt * 5000; // Increase delay with each attempt
+                console.log(`Received ${response.status}. Waiting ${delay}ms before retry...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+
+            const responseText = await response.text();
+            console.log('Roblox API Response:', {
+                status: response.status,
+                statusText: response.statusText,
+                body: responseText
+            });
+
+            if (!response.ok) {
+                throw new Error(`Upload failed: ${response.status} ${response.statusText}\n${responseText}`);
+            }
+
+            const data = JSON.parse(responseText);
+            return data.id || data.assetId;
+
+        } catch (error) {
+            console.error(`Upload attempt ${attempt} failed:`, error);
+            lastError = error;
+            
+            // If it's the last attempt, throw the error
+            if (attempt === maxRetries) {
+                throw new Error(`Failed to upload after ${maxRetries} attempts: ${lastError.message}`);
+            }
+            
+            // Otherwise wait and try again
+            const delay = attempt * 5000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
 }
-if (!ROBLOX_CREATOR_ID) {
-throw new Error('ROBLOX_CREATOR_ID not configured');
-}
 
+// Updated endpoint with better error handling
+app.post('/api/upload-to-roblox', async (req, res) => {
+    try {
+        const { audioId } = req.body;
+        if (!audioId) {
+            return res.status(400).json({ error: 'Missing audioId' });
+        }
 
-if (!fs.existsSync(audioPath)) {
-    throw new Error(`Audio file not found: ${audioPath}`);
-}
+        const mp3File = path.join(audioDir, `${audioId}.mp3`);
+        if (!fs.existsSync(mp3File)) {
+            return res.status(404).json({ error: 'Audio file not found' });
+        }
 
-const fileStats = fs.statSync(audioPath);
-if (fileStats.size > MAX_AUDIO_SIZE) {
-    throw new Error(`File size ${fileStats.size} exceeds maximum allowed size of ${MAX_AUDIO_SIZE}`);
-}
+        console.log('Processing Roblox upload request for audio:', audioId);
+        const robloxAssetId = await uploadAudioToRoblox(mp3File);
+        
+        const responseObj = {
+            success: true,
+            robloxAssetId: robloxAssetId
+        };
+        console.log('Upload successful:', responseObj);
+        res.json(responseObj);
 
-const form = new FormData();
-// The new API expects a file stream under the key "fileContent"
-form.append('fileContent', fs.createReadStream(audioPath));
-// Add additional required fields. Adjust field names if needed.
-form.append('displayName', path.basename(audioPath, '.mp3'));
-form.append('creatorId', ROBLOX_CREATOR_ID);
-form.append('assetType', 'Audio');
-
-console.log('Uploading to Roblox using new /v1/audio endpoint:', {
-    fileName: path.basename(audioPath),
-    fileSize: fileStats.size,
-    creatorId: ROBLOX_CREATOR_ID
+    } catch (error) {
+        console.error('Roblox upload error:', error);
+        res.status(500).json({
+            error: 'Failed to upload to Roblox',
+            details: error.message
+        });
+    }
 });
 
 // Helper function to perform the upload request with a given XSRF token

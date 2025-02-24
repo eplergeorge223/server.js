@@ -10,8 +10,9 @@ const app = express();
 // Configuration
 const config = {
     port: process.env.PORT || 8080,
-    robloxApiKey: process.env.ROBLOX_API_KEY,
+    robloxApiKey: process.env.ROBLOX_API_KEY, // if needed by your endpoint
     robloxCreatorId: process.env.ROBLOX_CREATOR_ID,
+    robloxSecurityCookie: process.env.ROBLOX_SECURITY_COOKIE, // Your .ROBLOSECURITY cookie value
     maxAudioSize: 20 * 1024 * 1024, // 20MB
     cleanupInterval: 3600000, // 1 hour
     retryDelay: 2000,
@@ -105,7 +106,7 @@ function runEspeak(text, voice, speed, outputPath) {
     });
 }
 
-// Enhanced audio conversion
+// Enhanced audio conversion using FFmpeg
 function convertToMp3(inputPath, outputPath) {
     return new Promise((resolve, reject) => {
         console.log('Converting to MP3:', { input: inputPath, output: outputPath });
@@ -140,10 +141,10 @@ function convertToMp3(inputPath, outputPath) {
     });
 }
 
-// Improved Roblox upload function
+// Improved Roblox upload function with cookie authentication
 async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
-    if (!config.robloxApiKey || !config.robloxCreatorId) {
-        throw new Error('Roblox API credentials not configured');
+    if (!config.robloxApiKey || !config.robloxCreatorId || !config.robloxSecurityCookie) {
+        throw new Error('Roblox API credentials or security cookie not configured');
     }
 
     const stats = fs.statSync(audioPath);
@@ -172,6 +173,8 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 headers: {
                     'x-api-key': config.robloxApiKey,
                     'x-csrf-token': xsrfToken,
+                    // Include the .ROBLOSECURITY cookie from the environment variable
+                    'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie}`,
                     ...form.getHeaders()
                 },
                 body: form,
@@ -351,7 +354,7 @@ app.get('/health', (req, res) => {
                 size: stats.size,
                 used: stats.blocks * stats.blksize
             },
-            robloxConfigured: !!(config.robloxApiKey && config.robloxCreatorId),
+            robloxConfigured: !!(config.robloxApiKey && config.robloxCreatorId && config.robloxSecurityCookie),
             version: process.env.npm_package_version || '1.0.0',
             uptime: process.uptime()
         });
@@ -376,6 +379,8 @@ TTS Server Started
 - Port: ${config.port}
 - Audio directory: ${config.audioDir}
 - Roblox API: ${config.robloxApiKey ? 'Configured' : 'Not configured'}
+- Roblox Creator ID: ${config.robloxCreatorId ? 'Configured' : 'Not configured'}
+- Roblox Security Cookie: ${config.robloxSecurityCookie ? 'Configured' : 'Not configured'}
 - Platform: ${process.platform}
     `);
 });

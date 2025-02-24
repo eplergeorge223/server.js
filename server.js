@@ -162,6 +162,7 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
             
             // Read the file into a Buffer
             const fileBuffer = fs.readFileSync(audioPath);
+            console.log(`File buffer size: ${fileBuffer.length}`);
             
             // Append the file with proper metadata
             form.append('file', fileBuffer, {

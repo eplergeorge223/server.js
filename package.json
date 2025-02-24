@@ -3,10 +3,8 @@
   "version": "1.0.0",
   "description": "eSpeak TTS API Server",
   "main": "server.js",
-   "type": "module",
   "scripts": {
     "start": "node server.js"
-     "dev": "node server.js"
   },
   "dependencies": {
     "express": "^4.17.1",

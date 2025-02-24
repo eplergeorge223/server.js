@@ -158,8 +158,8 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const form = new FormData();
-            // Use 'file' as the field name so Roblox detects the file upload.
-            form.append('file', fs.createReadStream(audioPath));
+            // Append the file with an explicit filename to ensure it's recognized.
+            form.append('file', fs.createReadStream(audioPath), { filename: path.basename(audioPath) });
             form.append('displayName', path.basename(audioPath, '.mp3'));
             form.append('creatorId', config.robloxCreatorId);
             form.append('assetType', 'Audio');
@@ -174,7 +174,7 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 headers: {
                     'x-api-key': config.robloxApiKey,
                     'x-csrf-token': xsrfToken,
-                    // Trim the cookie value to ensure no extra spaces or newlines are present
+                    // Trim the cookie value to ensure no extra spaces/newlines.
                     'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie.trim()}`,
                     ...form.getHeaders()
                 },

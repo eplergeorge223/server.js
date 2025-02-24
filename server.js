@@ -373,7 +373,7 @@ res.status(500).json({ error: error.message });
 // Handle startup
 app.listen(port, () => {
 console.log('Running on platform:', process.platform);
-console.log(eSpeak TTS server listening on port ${port});
+console.log(`eSpeak TTS server listening on port ${port}`);
 console.log('Roblox API integration:', ROBLOX_API_KEY && ROBLOX_CREATOR_ID ? 'Configured' : 'Not configured');
 });
 

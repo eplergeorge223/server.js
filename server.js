@@ -173,8 +173,8 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 headers: {
                     'x-api-key': config.robloxApiKey,
                     'x-csrf-token': xsrfToken,
-                    // Include the .ROBLOSECURITY cookie from the environment variable
-                    'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie}`,
+                    // Trim the cookie value to ensure no extra spaces or newlines are present
+                    'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie.trim()}`,
                     ...form.getHeaders()
                 },
                 body: form,

@@ -10,9 +10,9 @@ const app = express();
 // Configuration
 const config = {
     port: process.env.PORT || 8080,
-    robloxApiKey: process.env.ROBLOX_API_KEY, // if needed by your endpoint
+    robloxApiKey: process.env.ROBLOX_API_KEY,
     robloxCreatorId: process.env.ROBLOX_CREATOR_ID,
-    robloxSecurityCookie: process.env.ROBLOX_SECURITY_COOKIE, // Your .ROBLOSECURITY cookie value
+    robloxSecurityCookie: process.env.ROBLOX_SECURITY_COOKIE,
     maxAudioSize: 20 * 1024 * 1024, // 20MB
     cleanupInterval: 3600000, // 1 hour
     retryDelay: 2000,
@@ -141,7 +141,7 @@ function convertToMp3(inputPath, outputPath) {
     });
 }
 
-// Improved Roblox upload function with cookie authentication
+// Improved Roblox upload function with proper file handling
 async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
     if (!config.robloxApiKey || !config.robloxCreatorId || !config.robloxSecurityCookie) {
         throw new Error('Roblox API credentials or security cookie not configured');
@@ -157,24 +157,40 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
+            // Create a new FormData instance for each attempt
             const form = new FormData();
-            // Append the file with an explicit filename to ensure it's recognized.
-            form.append('file', fs.createReadStream(audioPath), { filename: path.basename(audioPath) });
-            form.append('displayName', path.basename(audioPath, '.mp3'));
-            form.append('creatorId', config.robloxCreatorId);
-            form.append('assetType', 'Audio');
+            
+            // Read the file into a Buffer
+            const fileBuffer = fs.readFileSync(audioPath);
+            
+            // Append the file with proper metadata
+            form.append('file', fileBuffer, {
+                filename: path.basename(audioPath),
+                contentType: 'audio/mpeg',
+                knownLength: stats.size
+            });
+            
+            form.append('name', path.basename(audioPath, '.mp3'));
+            form.append('creatorTargetId', config.robloxCreatorId);
+            form.append('creatorType', 'User');
+            form.append('description', 'TTS Audio');
+            form.append('paymentModalType', 'None');
 
             console.log(`Upload attempt ${attempt}/${maxRetries}:`, {
                 file: path.basename(audioPath),
-                size: stats.size
+                size: stats.size,
+                formData: {
+                    name: path.basename(audioPath, '.mp3'),
+                    creatorTargetId: config.robloxCreatorId,
+                    contentType: 'audio/mpeg'
+                }
             });
 
             const response = await fetch('https://publish.roblox.com/v1/audio', {
                 method: 'POST',
                 headers: {
                     'x-api-key': config.robloxApiKey,
-                    'x-csrf-token': xsrfToken,
-                    // Trim the cookie value to ensure no extra spaces/newlines.
+                    'x-csrf-token': xsrfToken || '',
                     'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie.trim()}`,
                     ...form.getHeaders()
                 },
@@ -196,7 +212,8 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 throw new Error(`Upload failed: ${response.status} ${JSON.stringify(data)}`);
             }
 
-            return data.id || data.assetId;
+            console.log('Upload successful:', data);
+            return data.audioAssetId || data.assetId;
 
         } catch (error) {
             console.error(`Upload attempt ${attempt} failed:`, error);
@@ -235,7 +252,6 @@ app.post('/api/tts', async (req, res) => {
 
         console.log('Processing TTS request:', { text, voice, speed, hash });
 
-        // Clean the host value by removing stray quotes and extra whitespace.
         const host = req.get('host').replace(/'/g, '').trim();
 
         if (fs.existsSync(mp3File)) {
@@ -254,7 +270,6 @@ app.post('/api/tts', async (req, res) => {
         await runEspeak(text, voice, speed, wavFile);
         await convertToMp3(wavFile, mp3File);
         
-        // Cleanup WAV file
         if (fs.existsSync(wavFile)) {
             fs.unlinkSync(wavFile);
             console.log('Cleaned up WAV file:', wavFile);
@@ -282,7 +297,7 @@ app.post('/api/tts', async (req, res) => {
     }
 });
 
-// Roblox upload endpoint
+// Enhanced Roblox upload endpoint with better error handling
 app.post('/api/upload-to-roblox', async (req, res) => {
     try {
         const { audioId } = req.body;
@@ -291,13 +306,25 @@ app.post('/api/upload-to-roblox', async (req, res) => {
         }
 
         const mp3File = path.join(config.audioDir, `${audioId}.mp3`);
+        console.log('Attempting to upload file:', mp3File);
+        
         if (!fs.existsSync(mp3File)) {
             return res.status(404).json({ error: 'Audio file not found' });
         }
 
+        // Log file stats
+        const stats = fs.statSync(mp3File);
+        console.log('File stats:', {
+            size: stats.size,
+            permissions: stats.mode,
+            created: stats.birthtime,
+            modified: stats.mtime
+        });
+
         console.log('Processing Roblox upload:', audioId);
         const robloxAssetId = await uploadAudioToRoblox(mp3File);
         
+        console.log('Upload successful, asset ID:', robloxAssetId);
         res.json({
             success: true,
             robloxAssetId

@@ -158,7 +158,8 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const form = new FormData();
-            form.append('fileContent', fs.createReadStream(audioPath));
+            // Use 'file' as the field name so Roblox detects the file upload.
+            form.append('file', fs.createReadStream(audioPath));
             form.append('displayName', path.basename(audioPath, '.mp3'));
             form.append('creatorId', config.robloxCreatorId);
             form.append('assetType', 'Audio');
@@ -234,6 +235,9 @@ app.post('/api/tts', async (req, res) => {
 
         console.log('Processing TTS request:', { text, voice, speed, hash });
 
+        // Clean the host value by removing stray quotes and extra whitespace.
+        const host = req.get('host').replace(/'/g, '').trim();
+
         if (fs.existsSync(mp3File)) {
             console.log('Cache hit:', hash);
             const duration = await getAudioDuration(mp3File);
@@ -243,7 +247,7 @@ app.post('/api/tts', async (req, res) => {
                 audio_id: hash,
                 duration,
                 file_size: stats.size,
-                url: `https://${req.get('host')}/audio/${hash}.mp3`
+                url: `https://${host}/audio/${hash}.mp3`
             });
         }
 
@@ -263,7 +267,7 @@ app.post('/api/tts', async (req, res) => {
             audio_id: hash,
             duration,
             file_size: stats.size,
-            url: `https://${req.get('host')}/audio/${hash}.mp3`
+            url: `https://${host}/audio/${hash}.mp3`
         };
 
         console.log('Success:', response);

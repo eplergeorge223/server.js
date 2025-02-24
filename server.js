@@ -10,7 +10,7 @@ const app = express();
 // Configuration
 const port = process.env.PORT || 8080;
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
-const ROBLOX_CREATOR_ID = profmcess.env.ROBLOX_CREATOR_ID;
+const ROBLOX_CREATOR_ID = process.env.ROBLOX_CREATOR_ID;
 const MAX_AUDIO_SIZE = 20 * 1024 * 1024; // 20MB limit
 const CLEANUP_INTERVAL = 3600000; // 1 hour in milliseconds
 const RETRY_DELAY_MS = 2000; // Delay between retries (2 seconds)
@@ -21,101 +21,99 @@ app.use(express.json());
 // Create audio directory for storage
 const audioDir = path.join(process.cwd(), 'audio');
 if (!fs.existsSync(audioDir)) {
-fs.mkdirSync(audioDir, { recursive: true });
-console.log('Created audio storage folder:', audioDir);
+    fs.mkdirSync(audioDir, { recursive: true });
+    console.log('Created audio storage folder:', audioDir);
 }
 
 // Set CORS headers
 app.use((req, res, next) => {
-res.header('Access-Control-Allow-Origin', '*');
-res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-res.header('Access-Control-Allow-Headers', 'Content-Type');
-next();
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    next();
 });
 
-// Improved espeak function
+// Improved espeak function with better error handling
 function runEspeak(args) {
-return new Promise((resolve, reject) => {
-console.log('Executing command: espeak', args.join(' '));
-const espeak = spawn('espeak', args);
-let errorOutput = '';
+    return new Promise((resolve, reject) => {
+        console.log('Executing command: espeak', args.join(' '));
+        const espeak = spawn('espeak', args);
+        let errorOutput = '';
 
+        espeak.stderr.on('data', (data) => {
+            errorOutput += data;
+            console.log('eSpeak stderr:', data.toString());
+        });
 
-    espeak.stderr.on('data', (data) => {
-        errorOutput += data;
-        console.log('eSpeak stderr:', data.toString());
+        espeak.stdout.on('data', (data) => {
+            console.log('eSpeak stdout:', data.toString());
+        });
+
+        espeak.on('close', (code) => {
+            console.log(`espeak exited with code ${code}`);
+            if (code !== 0) {
+                return reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
+            }
+            resolve();
+        });
+
+        espeak.on('error', (error) => {
+            console.error('eSpeak process error:', error);
+            reject(error);
+        });
     });
-
-    espeak.stdout.on('data', (data) => {
-        console.log('eSpeak stdout:', data.toString());
-    });
-
-    espeak.on('close', (code) => {
-        console.log(`espeak exited with code ${code}`);
-        if (code !== 0) {
-            return reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
-        }
-        resolve();
-    });
-
-    espeak.on('error', (error) => {
-        console.error('eSpeak process error:', error);
-        reject(error);
-    });
-});
 }
 
-// Improved audio conversion function
+// Improved audio conversion function with better error handling
 function convertToMp3(wavFile, mp3File) {
-return new Promise((resolve, reject) => {
-console.log('Converting WAV to MP3:', wavFile, '->', mp3File);
+    return new Promise((resolve, reject) => {
+        console.log('Converting WAV to MP3:', wavFile, '->', mp3File);
 
+        const ffmpeg = spawn('ffmpeg', [
+            '-i', wavFile,
+            '-acodec', 'libmp3lame',
+            '-ab', '128k',
+            '-ar', '44100',
+            '-y',
+            mp3File
+        ]);
 
-    const ffmpeg = spawn('ffmpeg', [
-        '-i', wavFile,
-        '-acodec', 'libmp3lame',
-        '-ab', '128k',
-        '-ar', '44100',
-        '-y',
-        mp3File
-    ]);
+        let errorOutput = '';
+        let outputLog = '';
 
-    let errorOutput = '';
-    let outputLog = '';
+        ffmpeg.stderr.on('data', (data) => {
+            const message = data.toString();
+            errorOutput += message;
+            console.log('FFmpeg stderr:', message);
+        });
 
-    ffmpeg.stderr.on('data', (data) => {
-        const message = data.toString();
-        errorOutput += message;
-        console.log('FFmpeg stderr:', message);
+        ffmpeg.stdout.on('data', (data) => {
+            outputLog += data.toString();
+            console.log('FFmpeg stdout:', data.toString());
+        });
+
+        ffmpeg.on('close', (code) => {
+            console.log('FFmpeg conversion complete with code:', code);
+            if (code === 0 && fs.existsSync(mp3File) && fs.statSync(mp3File).size > 0) {
+                resolve();
+            } else {
+                reject(new Error(`FFmpeg conversion failed (code ${code}): ${errorOutput}`));
+            }
+        });
+
+        ffmpeg.on('error', (error) => {
+            console.error('FFmpeg process error:', error);
+            reject(error);
+        });
     });
-
-    ffmpeg.stdout.on('data', (data) => {
-        outputLog += data.toString();
-        console.log('FFmpeg stdout:', data.toString());
-    });
-
-    ffmpeg.on('close', (code) => {
-        console.log('FFmpeg conversion complete with code:', code);
-        if (code === 0 && fs.existsSync(mp3File) && fs.statSync(mp3File).size > 0) {
-            resolve();
-        } else {
-            reject(new Error(`FFmpeg conversion failed (code ${code}): ${errorOutput}`));
-        }
-    });
-
-    ffmpeg.on('error', (error) => {
-        console.error('FFmpeg process error:', error);
-        reject(error);
-    });
-});
 }
 
 // Helper delay function
 function delay(ms) {
-return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Function to handle Roblox upload with multiple retries
+// Improved Roblox upload function with retry logic
 async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
     if (!ROBLOX_API_KEY) {
         throw new Error('ROBLOX_API_KEY not configured');
@@ -136,7 +134,6 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
     let lastError = null;
     let xsrfToken = '';
 
-    // Try multiple times with increasing delays
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const form = new FormData();
@@ -162,7 +159,6 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 timeout: 30000 // 30 second timeout
             });
 
-            // If we get a 403, try to get a new XSRF token
             if (response.status === 403) {
                 xsrfToken = response.headers.get('x-csrf-token');
                 if (!xsrfToken) {
@@ -172,9 +168,8 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 continue;
             }
 
-            // If we get a timeout or 5xx error, retry
             if (response.status === 408 || (response.status >= 500 && response.status < 600)) {
-                const delay = attempt * 5000; // Increase delay with each attempt
+                const delay = attempt * 5000;
                 console.log(`Received ${response.status}. Waiting ${delay}ms before retry...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 continue;
@@ -198,19 +193,87 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
             console.error(`Upload attempt ${attempt} failed:`, error);
             lastError = error;
             
-            // If it's the last attempt, throw the error
             if (attempt === maxRetries) {
                 throw new Error(`Failed to upload after ${maxRetries} attempts: ${lastError.message}`);
             }
             
-            // Otherwise wait and try again
             const delay = attempt * 5000;
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
 }
 
-// Updated endpoint with better error handling
+// Serve audio files statically
+app.use('/audio', express.static(audioDir));
+
+// Main TTS endpoint
+app.post('/api/tts', async (req, res) => {
+    try {
+        const { text, voice = 'en', speed = 175 } = req.body;
+
+        if (!text) {
+            return res.status(400).json({ error: 'Missing required field: text' });
+        }
+        if (text.length > 1000) {
+            return res.status(400).json({ error: 'Text exceeds maximum length of 1000 characters' });
+        }
+        
+        const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
+        const wavFile = path.join(audioDir, `${hash}.wav`);
+        const mp3File = path.join(audioDir, `${hash}.mp3`);
+        
+        console.log('Processing TTS request:', {
+            text,
+            voice,
+            speed,
+            hash
+        });
+
+        if (fs.existsSync(mp3File)) {
+            console.log(`Audio cache hit for "${text}"`);
+            const stats = fs.statSync(mp3File);
+            const duration = (stats.size / (44100 * (128/8))) || 1;
+            return res.json({
+                audio_id: hash,
+                duration: duration,
+                file_size: stats.size,
+                url: `https://${req.get('host')}/audio/${hash}.mp3`
+            });
+        }
+        
+        console.log('Generating new audio file');
+        const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
+        await runEspeak(args);
+        await convertToMp3(wavFile, mp3File);
+        
+        if (fs.existsSync(wavFile)) {
+            fs.unlinkSync(wavFile);
+            console.log('Cleaned up WAV file:', wavFile);
+        }
+        
+        const stats = fs.statSync(mp3File);
+        const duration = (stats.size / (44100 * (128/8))) || 1;
+        
+        const responseObj = {
+            audio_id: hash,
+            duration: duration,
+            file_size: stats.size,
+            url: `https://${req.get('host')}/audio/${hash}.mp3`
+        };
+        
+        console.log('Sending response:', responseObj);
+        res.json(responseObj);
+        
+    } catch (error) {
+        console.error('TTS error:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
+// Roblox upload endpoint
 app.post('/api/upload-to-roblox', async (req, res) => {
     try {
         const { audioId } = req.body;
@@ -242,244 +305,80 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     }
 });
 
-// Helper function to perform the upload request with a given XSRF token
-async function makeUploadRequest(xsrfToken) {
-    return await fetch('https://publish.roblox.com/v1/audio', {
-        method: 'POST',
-        headers: {
-            'x-api-key': ROBLOX_API_KEY,
-            'x-csrf-token': xsrfToken,
-            ...form.getHeaders()
-        },
-        body: form
-    });
-}
-
-// First attempt with an empty XSRF token
-let response = await makeUploadRequest('');
-
-// If forbidden, try to extract the XSRF token and retry.
-if (response.status === 403) {
-    const newXsrfToken = response.headers.get('x-csrf-token');
-    if (!newXsrfToken) {
-        throw new Error('XSRF token invalid and none provided in response');
-    }
-    console.log('Retrieved new XSRF token, retrying upload...');
-    response = await makeUploadRequest(newXsrfToken);
-}
-
-// If we receive a 408 (Request Timeout), wait and retry one more time.
-if (response.status === 408) {
-    console.log('Received 408 (Request Timeout). Waiting and retrying...');
-    await delay(RETRY_DELAY_MS);
-    response = await makeUploadRequest(response.headers.get('x-csrf-token') || '');
-}
-
-const responseText = await response.text();
-console.log('Roblox API Response:', {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers.raw(),
-    body: responseText
-});
-
-if (!response.ok) {
-    let errorDetails;
-    try {
-        errorDetails = JSON.parse(responseText);
-    } catch (e) {
-        errorDetails = responseText;
-    }
-    throw new Error(`Roblox upload failed: ${response.statusText}\nDetails: ${JSON.stringify(errorDetails)}`);
-}
-
-// Parse the JSON response to extract asset details
-const data = JSON.parse(responseText);
-console.log('Roblox upload successful:', data);
-return data.id || data.assetId;
-}
-
-// Serve audio files statically
-app.use('/audio', express.static(audioDir));
-
-// Main TTS endpoint
-app.post('/api/tts', async (req, res) => {
-try {
-const { text, voice = 'en', speed = 175 } = req.body;
-
-
-    if (!text) {
-        return res.status(400).json({ error: 'Missing required field: text' });
-    }
-    if (text.length > 1000) {
-        return res.status(400).json({ error: 'Text exceeds maximum length of 1000 characters' });
-    }
-    
-    const hash = crypto.createHash('md5').update(text + voice + speed).digest('hex');
-    const wavFile = path.join(audioDir, `${hash}.wav`);
-    const mp3File = path.join(audioDir, `${hash}.mp3`);
-    
-    console.log('Processing TTS request:', {
-        text,
-        voice,
-        speed,
-        hash
-    });
-
-    if (fs.existsSync(mp3File)) {
-        console.log(`Audio cache hit for "${text}"`);
-        const stats = fs.statSync(mp3File);
-        const duration = (stats.size / (44100 * (128/8))) || 1;
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-        return res.json({
-            audio_id: hash,
-            duration: duration,
-            file_size: stats.size,
-            url: `${baseUrl}/audio/${hash}.mp3`
-        });
-    }
-    
-    console.log('Generating new audio file');
-    const args = ['-v', voice, '-s', speed.toString(), text, '-w', wavFile];
-    await runEspeak(args);
-    await convertToMp3(wavFile, mp3File);
-    
-    if (fs.existsSync(wavFile)) {
-        fs.unlinkSync(wavFile);
-        console.log('Cleaned up WAV file:', wavFile);
-    }
-    
-    const stats = fs.statSync(mp3File);
-    const duration = (stats.size / (44100 * (128/8))) || 1;
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    
-    const responseObj = {
-        audio_id: hash,
-        duration: duration,
-        file_size: stats.size,
-        url: `${baseUrl}/audio/${hash}.mp3`
-    };
-    
-    console.log('Sending response:', responseObj);
-    res.json(responseObj);
-    
-} catch (error) {
-    console.error('TTS error:', error);
-    res.status(500).json({
-        error: 'Internal server error',
-        details: error.message
-    });
-}
-});
-
-// Roblox upload endpoint
-app.post('/api/upload-to-roblox', async (req, res) => {
-try {
-const { audioId } = req.body;
-if (!audioId) {
-return res.status(400).json({ error: 'Missing audioId' });
-}
-
-
-    const mp3File = path.join(audioDir, `${audioId}.mp3`);
-    if (!fs.existsSync(mp3File)) {
-        return res.status(404).json({ error: 'Audio file not found' });
-    }
-
-    console.log('Processing Roblox upload request for audio:', audioId);
-    const robloxAssetId = await uploadAudioToRoblox(mp3File);
-    
-    const responseObj = {
-        success: true,
-        robloxAssetId: robloxAssetId
-    };
-    console.log('Upload successful:', responseObj);
-    res.json(responseObj);
-
-} catch (error) {
-    console.error('Roblox upload error:', error);
-    res.status(500).json({
-        error: 'Failed to upload to Roblox',
-        details: error.message
-    });
-}
-});
-
 // Cleanup endpoint
 app.post('/api/cleanup', (req, res) => {
-try {
-const files = fs.readdirSync(audioDir);
-const now = Date.now();
-let cleaned = 0;
-let errors = [];
+    try {
+        const files = fs.readdirSync(audioDir);
+        const now = Date.now();
+        let cleaned = 0;
+        let errors = [];
 
-
-    files.forEach(file => {
-        try {
-            const filePath = path.join(audioDir, file);
-            const stats = fs.statSync(filePath);
-            if (now - stats.mtimeMs > CLEANUP_INTERVAL) {
-                fs.unlinkSync(filePath);
-                cleaned++;
-                console.log('Cleaned up file:', filePath);
+        files.forEach(file => {
+            try {
+                const filePath = path.join(audioDir, file);
+                const stats = fs.statSync(filePath);
+                if (now - stats.mtimeMs > CLEANUP_INTERVAL) {
+                    fs.unlinkSync(filePath);
+                    cleaned++;
+                    console.log('Cleaned up file:', filePath);
+                }
+            } catch (error) {
+                console.error('Error cleaning up file:', file, error);
+                errors.push({ file, error: error.message });
             }
-        } catch (error) {
-            console.error('Error cleaning up file:', file, error);
-            errors.push({ file, error: error.message });
-        }
-    });
+        });
 
-    res.json({ 
-        message: `Cleaned up ${cleaned} files`,
-        errors: errors.length > 0 ? errors : undefined
-    });
-} catch (error) {
-    console.error('Cleanup error:', error);
-    res.status(500).json({ error: error.message });
-}
+        res.json({ 
+            message: `Cleaned up ${cleaned} files`,
+            errors: errors.length > 0 ? errors : undefined
+        });
+    } catch (error) {
+        console.error('Cleanup error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-try {
-const diskSpace = fs.statSync(audioDir);
-res.json({
-status: 'ok',
-timestamp: new Date().toISOString(),
-audioDir: audioDir,
-audioDirExists: fs.existsSync(audioDir),
-platform: process.platform,
-files: fs.readdirSync(audioDir).length,
-diskSpace: {
-free: diskSpace.size,
-used: diskSpace.blocks * diskSpace.blksize
-},
-robloxConfigured: !!(ROBLOX_API_KEY && ROBLOX_CREATOR_ID),
-version: process.env.npm_package_version || '1.0.0',
-uptime: process.uptime()
-});
-} catch (error) {
-console.error('Health check error:', error);
-res.status(500).json({ error: error.message });
-}
+    try {
+        const diskSpace = fs.statSync(audioDir);
+        res.json({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            audioDir: audioDir,
+            audioDirExists: fs.existsSync(audioDir),
+            platform: process.platform,
+            files: fs.readdirSync(audioDir).length,
+            diskSpace: {
+                free: diskSpace.size,
+                used: diskSpace.blocks * diskSpace.blksize
+            },
+            robloxConfigured: !!(ROBLOX_API_KEY && ROBLOX_CREATOR_ID),
+            version: process.env.npm_package_version || '1.0.0',
+            uptime: process.uptime()
+        });
+    } catch (error) {
+        console.error('Health check error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Handle startup
 app.listen(port, () => {
-console.log('Running on platform:', process.platform);
-console.log(`eSpeak TTS server listening on port ${port}`);
-console.log('Roblox API integration:', ROBLOX_API_KEY && ROBLOX_CREATOR_ID ? 'Configured' : 'Not configured');
+    console.log('Running on platform:', process.platform);
+    console.log(`eSpeak TTS server listening on port ${port}`);
+    console.log('Roblox API integration:', ROBLOX_API_KEY && ROBLOX_CREATOR_ID ? 'Configured' : 'Not configured');
 });
 
 // Handle process termination
 process.on('SIGTERM', () => {
-console.log('SIGTERM received. Cleaning up...');
-process.exit(0);
+    console.log('SIGTERM received. Cleaning up...');
+    process.exit(0);
 });
 
 process.on('uncaughtException', (error) => {
-console.error('Uncaught exception:', error);
-if (error.fatal) {
-process.exit(1);
-}
+    console.error('Uncaught exception:', error);
+    if (error.fatal) {
+        process.exit(1);
+    }
 });

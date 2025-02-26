@@ -160,16 +160,16 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
             // Create a new FormData instance for each attempt
             const form = new FormData();
             
-            // Read the file into a Buffer
-            const fileBuffer = fs.readFileSync(audioPath);
+            // Use createReadStream instead of readFileSync for proper file handling
+            const fileStream = fs.createReadStream(audioPath);
             
             // Append the file with proper metadata
-            form.append('file', fileBuffer, {
+            form.append('file', fileStream, {
                 filename: path.basename(audioPath),
-                contentType: 'audio/mpeg',
-                knownLength: stats.size
+                contentType: 'audio/mpeg'
             });
             
+            // Add other form fields
             form.append('name', path.basename(audioPath, '.mp3'));
             form.append('creatorTargetId', config.robloxCreatorId);
             form.append('creatorType', 'User');
@@ -186,14 +186,17 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 }
             });
 
+            // Use form.getHeaders() to get the proper Content-Type with boundary
+            const headers = {
+                'x-api-key': config.robloxApiKey,
+                'x-csrf-token': xsrfToken || '',
+                'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie.trim()}`,
+                ...form.getHeaders()
+            };
+
             const response = await fetch('https://publish.roblox.com/v1/audio', {
                 method: 'POST',
-                headers: {
-                    'x-api-key': config.robloxApiKey,
-                    'x-csrf-token': xsrfToken || '',
-                    'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie.trim()}`,
-                    ...form.getHeaders()
-                },
+                headers: headers,
                 body: form,
                 timeout: 30000
             });
@@ -223,7 +226,7 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 throw new Error(`Upload failed after ${maxRetries} attempts: ${lastError.message}`);
             }
             
-            await new Promise(resolve => setTimeout(resolve, attempt * 5000));
+            await new Promise(resolve => setTimeout(resolve, attempt * config.retryDelay));
         }
     }
 }

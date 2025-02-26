@@ -141,7 +141,6 @@ function convertToMp3(inputPath, outputPath) {
     });
 }
 
-// Improved Roblox upload function with proper file handling
 async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
     if (!config.robloxApiKey || !config.robloxCreatorId || !config.robloxSecurityCookie) {
         throw new Error('Roblox API credentials or security cookie not configured');
@@ -160,24 +159,28 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
             // Create a new FormData instance for each attempt
             const form = new FormData();
             
-            // Use createReadStream instead of readFileSync for proper file handling
-            const fileStream = fs.createReadStream(audioPath);
+            // IMPORTANT: Read file directly and use Buffer
+            const fileBuffer = fs.readFileSync(audioPath);
             
-            // Append the file with proper metadata
-            form.append('file', fileStream, {
-                filename: path.basename(audioPath),
+            // Get the file name without the path
+            const fileName = path.basename(audioPath);
+            
+            // Explicitly append each field in the correct order
+            // The file MUST be the first field according to Roblox API requirements
+            form.append('file', fileBuffer, {
+                filename: fileName,
                 contentType: 'audio/mpeg'
             });
             
-            // Add other form fields
+            // Add other required fields
             form.append('name', path.basename(audioPath, '.mp3'));
-            form.append('creatorTargetId', config.robloxCreatorId);
-            form.append('creatorType', 'User');
             form.append('description', 'TTS Audio');
+            form.append('creatorType', 'User');
+            form.append('creatorTargetId', config.robloxCreatorId);
             form.append('paymentModalType', 'None');
 
             console.log(`Upload attempt ${attempt}/${maxRetries}:`, {
-                file: path.basename(audioPath),
+                file: fileName,
                 size: stats.size,
                 formData: {
                     name: path.basename(audioPath, '.mp3'),
@@ -186,13 +189,15 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 }
             });
 
-            // Use form.getHeaders() to get the proper Content-Type with boundary
+            // Log the headers being sent
             const headers = {
                 'x-api-key': config.robloxApiKey,
                 'x-csrf-token': xsrfToken || '',
                 'Cookie': `.ROBLOSECURITY=${config.robloxSecurityCookie.trim()}`,
                 ...form.getHeaders()
             };
+            
+            console.log('Headers:', Object.keys(headers));
 
             const response = await fetch('https://publish.roblox.com/v1/audio', {
                 method: 'POST',
@@ -201,22 +206,30 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 timeout: 30000
             });
 
-            if (response.status === 403 && !xsrfToken) {
+            // Handle CSRF token if needed
+            if (response.status === 403 && response.headers.get('x-csrf-token')) {
                 xsrfToken = response.headers.get('x-csrf-token');
-                if (xsrfToken) {
-                    console.log('Retrieved new XSRF token');
-                    continue;
+                console.log('Retrieved CSRF token:', xsrfToken);
+                
+                // Retry immediately with the new token
+                continue;
+            }
+
+            let responseText;
+            try {
+                responseText = await response.text();
+                const data = JSON.parse(responseText);
+                
+                if (!response.ok) {
+                    throw new Error(`Upload failed: ${response.status} ${JSON.stringify(data)}`);
                 }
+                
+                console.log('Upload successful:', data);
+                return data.audioAssetId || data.assetId;
+            } catch (jsonError) {
+                console.error('Response parsing error:', jsonError, 'Raw response:', responseText);
+                throw new Error(`Invalid response format: ${responseText}`);
             }
-
-            const data = await response.json().catch(() => ({}));
-            
-            if (!response.ok) {
-                throw new Error(`Upload failed: ${response.status} ${JSON.stringify(data)}`);
-            }
-
-            console.log('Upload successful:', data);
-            return data.audioAssetId || data.assetId;
 
         } catch (error) {
             console.error(`Upload attempt ${attempt} failed:`, error);
@@ -226,6 +239,7 @@ async function uploadAudioToRoblox(audioPath, maxRetries = 3) {
                 throw new Error(`Upload failed after ${maxRetries} attempts: ${lastError.message}`);
             }
             
+            // Exponential backoff
             await new Promise(resolve => setTimeout(resolve, attempt * config.retryDelay));
         }
     }

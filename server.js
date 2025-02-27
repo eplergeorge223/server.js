@@ -87,9 +87,6 @@ function convertToMp3(inputPath, outputPath) {
  * Returns { audioFilePath, audioId }.
  */
 async function generateTTSAudio(text, voice = "en", speed = 175) {
-  // Check that environment variables are set (if needed)
-  // (This implementation assumes espeak and ffmpeg are installed and in PATH.)
-
   // Create a unique hash from text, voice, and speed
   const hash = crypto.createHash('md5').update(`${text}${voice}${speed}`).digest('hex');
   const wavFile = path.join(AUDIO_DIR, `${hash}.wav`);
@@ -273,12 +270,14 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   if (useOpenCloud && responseData.path) {
     const operationPath = responseData.path;
     try {
-      for (let i = 0; i < 10; i++) {
+      // Increase polling attempts to 20
+      for (let i = 0; i < 20; i++) {
         await new Promise(r => setTimeout(r, 1000));
         const opResponse = await axios.get(`https://apis.roblox.com/assets/v1/${operationPath}`, {
           headers: { 'x-api-key': ROBLOX_API_KEY }
         });
         const opData = opResponse.data;
+        console.log(`Polling operation status (attempt ${i + 1}):`, opData);
         if (opData && opData.done) {
           if (opData.response && opData.response.assetId) {
             assetId = opData.response.assetId;

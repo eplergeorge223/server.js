@@ -19,7 +19,7 @@ app.use(express.json());
 const config = {
   ROBLOX_API_KEY: process.env.ROBLOX_API_KEY || "",
   ROBLOX_SECURITY_COOKIE: process.env.ROBLOX_SECURITY || "",
-  CREATOR_TYPE: process.env.CREATOR_TYPE || "User",
+  CREATOR_TYPE: process.env.CREATOR_TYPE || "Group",
   CREATOR_ID: process.env.CREATOR_ID || "",
   MAX_RETRIES: Number(process.env.MAX_RETRIES) || 5,
   BASE_RETRY_DELAY: Number(process.env.BASE_RETRY_DELAY) || 500,

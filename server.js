@@ -5,195 +5,209 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-// Optionally, load environment variables from a .env file
+const { promisify } = require('util');
+const fsPromises = fs.promises;
+
+// Use environment variables for configuration
+// Uncomment to use dotenv if needed
 // require('dotenv').config();
 
 const app = express();
 app.use(express.json());
 
-// Configuration – set your Roblox API key (preferred) or .ROBLOSECURITY cookie and creator info
-const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY || "";       // Your Open Cloud API key
-const ROBLOX_SECURITY_COOKIE = process.env.ROBLOX_SECURITY || ""; // Your .ROBLOSECURITY (if using cookie auth)
-const CREATOR_TYPE = process.env.CREATOR_TYPE || "User";         // "User" or "Group"
-const CREATOR_ID = process.env.CREATOR_ID || "";                 // ID of the user or group to upload to
-const MAX_RETRIES = 5;      // max retry attempts for upload
-const BASE_RETRY_DELAY = 500; // base delay in ms for exponential backoff
+// API Configuration
+const config = {
+  ROBLOX_API_KEY: process.env.ROBLOX_API_KEY || "",
+  ROBLOX_SECURITY_COOKIE: process.env.ROBLOX_SECURITY || "",
+  CREATOR_TYPE: process.env.CREATOR_TYPE || "User",
+  CREATOR_ID: process.env.CREATOR_ID || "",
+  MAX_RETRIES: Number(process.env.MAX_RETRIES) || 5,
+  BASE_RETRY_DELAY: Number(process.env.BASE_RETRY_DELAY) || 500,
+  PORT: process.env.PORT || 3000,
+  OPERATION_POLLING_INTERVAL: Number(process.env.OPERATION_POLLING_INTERVAL) || 1000,
+  MAX_OPERATION_POLLING_ATTEMPTS: Number(process.env.MAX_OPERATION_POLLING_ATTEMPTS) || 20
+};
 
-// Directory for storing generated audio files
+// Set up cache and audio storage
 const AUDIO_DIR = path.join(process.cwd(), 'audio');
-if (!fs.existsSync(AUDIO_DIR)) {
-  fs.mkdirSync(AUDIO_DIR, { recursive: true });
-  console.log('Created audio directory:', AUDIO_DIR);
-}
+const CACHE = new Map(); // In-memory cache for quick lookups
+
+// Create audio directory if it doesn't exist
+(async () => {
+  try {
+    await fsPromises.mkdir(AUDIO_DIR, { recursive: true });
+    console.log('Audio directory ready:', AUDIO_DIR);
+  } catch (err) {
+    console.error('Failed to create audio directory:', err);
+    process.exit(1);
+  }
+})();
 
 /**
- * runEspeak
- * Uses espeak to generate a WAV file from the given text.
+ * Executes a shell command as a Promise
  */
-function runEspeak(text, voice, speed, outputPath) {
+function executeCommand(command, args, errorMessage) {
   return new Promise((resolve, reject) => {
-    const espeak = spawn('espeak', [
-      '-v', voice,
-      '-s', speed.toString(),
-      text,
-      '-w', outputPath
-    ]);
-    let errorOutput = "";
-    espeak.stderr.on('data', (data) => {
-      errorOutput += data.toString();
+    const process = spawn(command, args);
+    let stderr = '';
+    
+    process.stderr.on('data', (data) => {
+      stderr += data.toString();
     });
-    espeak.on('close', (code) => {
+    
+    process.on('close', (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
+        reject(new Error(`${errorMessage} (${code}): ${stderr}`));
       }
     });
   });
 }
 
 /**
- * convertToMp3
- * Uses ffmpeg to convert a WAV file to MP3.
+ * Generates a TTS audio file using eSpeak
  */
-function convertToMp3(inputPath, outputPath) {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
+async function runEspeak(text, voice, speed, outputPath) {
+  return executeCommand(
+    'espeak',
+    ['-v', voice, '-s', speed.toString(), text, '-w', outputPath],
+    'eSpeak failed'
+  );
+}
+
+/**
+ * Converts WAV to MP3 using FFmpeg
+ */
+async function convertToMp3(inputPath, outputPath) {
+  return executeCommand(
+    'ffmpeg',
+    [
       '-i', inputPath,
       '-acodec', 'libmp3lame',
       '-ab', '128k',
       '-ar', '44100',
       '-y',
       outputPath
+    ],
+    'FFmpeg conversion failed'
+  );
+}
+
+/**
+ * Get audio file duration using FFprobe
+ */
+async function getAudioDuration(filePath) {
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath
     ]);
-    let errorOutput = "";
-    ffmpeg.stderr.on('data', (data) => {
+    
+    let output = '';
+    let errorOutput = '';
+    
+    ffprobe.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+    
+    ffprobe.stderr.on('data', (data) => {
       errorOutput += data.toString();
     });
-    ffmpeg.on('close', (code) => {
+    
+    ffprobe.on('close', (code) => {
       if (code === 0) {
-        resolve();
+        resolve(parseFloat(output.trim()));
       } else {
-        reject(new Error(`FFmpeg failed with code ${code}: ${errorOutput}`));
+        resolve(0); // Default to 0 on error
       }
     });
   });
 }
 
 /**
- * generateTTSAudio
- * Generates an MP3 file from text by first calling espeak (to produce a WAV)
- * and then converting that WAV file to MP3 using ffmpeg.
- * Returns { audioFilePath, audioId }.
+ * Generates MP3 audio from text with caching support
  */
 async function generateTTSAudio(text, voice = "en", speed = 175) {
-  // Create a unique hash from text, voice, and speed
+  // Create a unique hash for cache key
   const hash = crypto.createHash('md5').update(`${text}${voice}${speed}`).digest('hex');
   const wavFile = path.join(AUDIO_DIR, `${hash}.wav`);
   const mp3File = path.join(AUDIO_DIR, `${hash}.mp3`);
+  
+  // Check memory cache first
+  if (CACHE.has(hash)) {
+    return CACHE.get(hash);
+  }
+  
+  // Check disk cache
+  try {
+    const exists = await fsPromises.access(mp3File)
+      .then(() => true)
+      .catch(() => false);
 
-  // Return cached MP3 if it exists
-  if (fs.existsSync(mp3File)) {
-    return { audioFilePath: mp3File, audioId: hash };
+    if (exists) {
+      const stats = await fsPromises.stat(mp3File);
+      const duration = await getAudioDuration(mp3File);
+      const result = { 
+        audioFilePath: mp3File, 
+        audioId: hash,
+        duration,
+        fileSize: stats.size 
+      };
+      CACHE.set(hash, result);
+      return result;
+    }
+  } catch (err) {
+    console.warn('Cache check error:', err.message);
   }
 
+  // Generate new audio
   try {
+    // Run espeak to generate WAV
     await runEspeak(text, voice, speed, wavFile);
-  } catch (err) {
-    throw new Error(`eSpeak generation error: ${err.message}`);
-  }
-
-  try {
+    
+    // Convert WAV to MP3
     await convertToMp3(wavFile, mp3File);
+    
+    // Get file stats and audio duration
+    const stats = await fsPromises.stat(mp3File);
+    const duration = await getAudioDuration(mp3File);
+    
+    // Clean up temp WAV file
+    await fsPromises.unlink(wavFile).catch(err => console.warn('WAV cleanup error:', err.message));
+    
+    // Cache result and return
+    const result = { 
+      audioFilePath: mp3File, 
+      audioId: hash,
+      duration,
+      fileSize: stats.size 
+    };
+    CACHE.set(hash, result);
+    return result;
   } catch (err) {
-    if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
-    throw new Error(`FFmpeg conversion error: ${err.message}`);
+    // Clean up partial files on error
+    await fsPromises.unlink(wavFile).catch(() => {});
+    await fsPromises.unlink(mp3File).catch(() => {});
+    throw err;
   }
-
-  // Clean up temporary WAV file
-  if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
-
-  return { audioFilePath: mp3File, audioId: hash };
 }
 
 /**
- * POST /api/tts
- * Expects JSON: { text, voice, speed }
- * Returns JSON: { audio_id, duration, file_size, url }
+ * Uploads an audio file to Roblox
  */
-app.post('/api/tts', async (req, res) => {
-  const { text, voice = "en", speed = 175 } = req.body;
-  if (!text || text.trim() === "") {
-    return res.status(400).json({ error: "No text provided for TTS." });
+async function uploadToRoblox(audioFile, audioId) {
+  if (!config.CREATOR_ID) {
+    throw new Error("CREATOR_ID is not configured");
   }
 
-  let audioResult;
-  try {
-    audioResult = await generateTTSAudio(text, voice, speed);
-  } catch (err) {
-    console.error("TTS generation failed:", err);
-    return res.status(500).json({ error: `TTS generation failed: ${err.message}` });
-  }
-
-  const { audioFilePath, audioId } = audioResult;
-
-  // Read the generated audio file and get file stats
-  let audioData;
-  try {
-    audioData = fs.readFileSync(audioFilePath);
-  } catch (err) {
-    console.error("Error reading audio file:", err);
-    return res.status(500).json({ error: "Failed to read generated audio file." });
-  }
-  const stats = fs.statSync(audioFilePath);
-  // For demonstration, a dummy duration (replace with actual duration if available)
-  const duration = 1.0;
-
-  // Build URL for static access (adjust scheme/host as necessary)
-  const host = req.get('host');
-  const url = `https://${host}/audio/${audioId}.mp3`;
-
-  return res.status(200).json({
-    audio_id: audioId,
-    duration: duration,
-    file_size: stats.size,
-    url: url
-  });
-});
-
-/**
- * POST /api/upload-to-roblox
- * Expects JSON: { audioId }
- * Reads the corresponding MP3 file and uploads it to Roblox.
- * Returns JSON: { robloxAssetId }
- */
-app.post('/api/upload-to-roblox', async (req, res) => {
-  const { audioId } = req.body;
-  if (!audioId) {
-    return res.status(400).json({ error: "Missing audioId" });
-  }
-
-  const mp3File = path.join(AUDIO_DIR, `${audioId}.mp3`);
-  console.log('Attempting to upload file:', mp3File);
+  const useOpenCloud = !!config.ROBLOX_API_KEY;
+  const assetName = `TTS Audio ${audioId.substring(0, 8)}`;
   
-  if (!fs.existsSync(mp3File)) {
-    return res.status(404).json({ error: "Audio file not found" });
-  }
-
-  const stats = fs.statSync(mp3File);
-  console.log('File stats:', {
-    size: stats.size,
-    created: stats.birthtime,
-    modified: stats.mtime
-  });
-
-  // Prepare form data for Roblox upload
+  // Create form data for upload
   const formData = new FormData();
-  if (!CREATOR_ID) {
-    console.error("CREATOR_ID is not configured.");
-    return res.status(500).json({ error: "Server configuration error: Creator ID not set." });
-  }
-  const assetName = `TTS Audio ${Date.now()}`;
   const requestPayload = {
     assetType: "Audio",
     creationContext: {
@@ -202,51 +216,58 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     description: "Text-to-Speech audio upload",
     displayName: assetName
   };
-  if (CREATOR_TYPE.toLowerCase() === "group") {
-    requestPayload.creationContext.creator.groupId = Number(CREATOR_ID);
+  
+  // Set creator information
+  if (config.CREATOR_TYPE.toLowerCase() === "group") {
+    requestPayload.creationContext.creator.groupId = Number(config.CREATOR_ID);
   } else {
-    requestPayload.creationContext.creator.userId = Number(CREATOR_ID);
+    requestPayload.creationContext.creator.userId = Number(config.CREATOR_ID);
   }
+  
+  // Add form data parts
   formData.append('request', JSON.stringify(requestPayload), { contentType: 'application/json' });
-  formData.append('fileContent', fs.readFileSync(mp3File), "ttsAudio.mp3");
-
-  // Set up headers for the request
-  const useOpenCloud = !!ROBLOX_API_KEY;
-  const headers = { 
-    ...formData.getHeaders()
-  };
+  formData.append('fileContent', fs.createReadStream(audioFile), "ttsAudio.mp3");
+  
+  // Set headers based on authentication method
+  const headers = { ...formData.getHeaders() };
   if (useOpenCloud) {
-    headers['x-api-key'] = ROBLOX_API_KEY;
-  } else if (ROBLOX_SECURITY_COOKIE) {
-    headers['Cookie'] = `.ROBLOSECURITY=${ROBLOX_SECURITY_COOKIE}`;
+    headers['x-api-key'] = config.ROBLOX_API_KEY;
+  } else if (config.ROBLOX_SECURITY_COOKIE) {
+    headers['Cookie'] = `.ROBLOSECURITY=${config.ROBLOX_SECURITY_COOKIE}`;
   }
 
   const uploadUrl = useOpenCloud 
     ? "https://apis.roblox.com/assets/v1/assets"
     : "https://www.roblox.com/asset/request-upload";
 
+  // Upload with retry logic
   let responseData;
   let lastError;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  
+  for (let attempt = 1; attempt <= config.MAX_RETRIES; attempt++) {
     try {
       const response = await axios.post(uploadUrl, formData, { headers });
       responseData = response.data;
       break;
     } catch (err) {
+      // Handle CSRF token for cookie auth
       if (!useOpenCloud && err.response && err.response.status === 403) {
         const csrfToken = err.response.headers['x-csrf-token'];
         if (csrfToken) {
           headers['X-CSRF-TOKEN'] = csrfToken;
-          console.warn("Received CSRF token, retrying upload with token.");
+          console.log("Received CSRF token, retrying upload");
           continue;
         }
       }
+      
       lastError = err;
-      if (attempt < MAX_RETRIES) {
+      
+      // Determine if we should retry
+      if (attempt < config.MAX_RETRIES) {
         const status = err.response ? err.response.status : null;
         if (!err.response || status === 429 || status >= 500) {
-          const delay = Math.pow(2, attempt) * BASE_RETRY_DELAY;
-          console.warn(`Upload attempt ${attempt} failed (status: ${status || err.message}). Retrying in ${delay}ms...`);
+          const delay = Math.pow(2, attempt) * config.BASE_RETRY_DELAY;
+          console.log(`Upload attempt ${attempt} failed (${status || 'network error'}). Retrying in ${delay}ms`);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -256,66 +277,152 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   }
 
   if (!responseData) {
-    if (lastError) {
-      if (lastError.response) {
-        console.error("Audio upload failed:", lastError.response.status, lastError.response.data);
-      } else {
-        console.error("Audio upload failed:", lastError.message);
-      }
+    if (lastError?.response) {
+      throw new Error(`Upload failed: ${lastError.response.status} - ${JSON.stringify(lastError.response.data)}`);
+    } else if (lastError) {
+      throw new Error(`Upload failed: ${lastError.message}`);
+    } else {
+      throw new Error("Upload failed with unknown error");
     }
-    return res.status(500).json({ error: "Audio upload failed. Please try again later." });
   }
 
+  // Handle asset ID retrieval
   let assetId = null;
+  
   if (useOpenCloud && responseData.path) {
+    // For Open Cloud API, poll operation status
     const operationPath = responseData.path;
-    try {
-      // Increase polling attempts to 20
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 1000));
-        const opResponse = await axios.get(`https://apis.roblox.com/assets/v1/${operationPath}`, {
-          headers: { 'x-api-key': ROBLOX_API_KEY }
-        });
-        const opData = opResponse.data;
-        console.log(`Polling operation status (attempt ${i + 1}):`, opData);
-        if (opData && opData.done) {
-          if (opData.response && opData.response.assetId) {
-            assetId = opData.response.assetId;
-          } else if (opData.error) {
-            const errMsg = opData.error.message || "unknown error";
-            throw new Error(`Asset upload failed: ${errMsg}`);
-          }
+    
+    for (let i = 0; i < config.MAX_OPERATION_POLLING_ATTEMPTS; i++) {
+      await new Promise(r => setTimeout(r, config.OPERATION_POLLING_INTERVAL));
+      
+      const opResponse = await axios.get(`https://apis.roblox.com/assets/v1/${operationPath}`, {
+        headers: { 'x-api-key': config.ROBLOX_API_KEY }
+      });
+      
+      const opData = opResponse.data;
+      console.log(`Operation status (attempt ${i + 1}):`, opData.status || opData.done || 'pending');
+      
+      if (opData && opData.done) {
+        if (opData.response && opData.response.assetId) {
+          assetId = opData.response.assetId;
           break;
+        } else if (opData.error) {
+          throw new Error(`Asset upload failed: ${opData.error.message || "unknown error"}`);
         }
+        break;
       }
-    } catch (err) {
-      console.error("Error checking operation status:", err.response ? err.response.data : err.message);
-      return res.status(500).json({ error: "Upload operation failed or timed out." });
     }
+    
     if (!assetId) {
-      console.error("Asset creation not completed within expected time.");
-      return res.status(500).json({ error: "Asset processing not completed. Please try again later." });
+      throw new Error("Asset processing timed out");
     }
   } else if (!useOpenCloud) {
-    if (responseData.assetId) {
-      assetId = responseData.assetId;
-    } else if (responseData.Id) {
-      assetId = responseData.Id;
-    }
+    // For legacy API, extract asset ID directly
+    assetId = responseData.assetId || responseData.Id;
+    
     if (!assetId) {
-      console.error("Failed to retrieve asset ID from legacy upload response.");
-      return res.status(500).json({ error: "Failed to retrieve asset ID from Roblox." });
+      throw new Error("Failed to retrieve asset ID from upload response");
     }
   }
 
-  console.log(`Upload successful. Asset ID: ${assetId}`);
-  return res.status(200).json({ robloxAssetId: assetId });
+  return assetId;
+}
+
+// API ENDPOINTS
+
+/**
+ * TTS Generation Endpoint
+ * POST /api/tts
+ */
+app.post('/api/tts', async (req, res) => {
+  const { text, voice = "en", speed = 175 } = req.body;
+  
+  if (!text || text.trim() === "") {
+    return res.status(400).json({ error: "No text provided for TTS" });
+  }
+
+  try {
+    const { audioFilePath, audioId, duration, fileSize } = await generateTTSAudio(text, voice, speed);
+    
+    // Build URL for static access
+    const protocol = req.get('x-forwarded-proto') || req.protocol;
+    const host = req.get('host');
+    const url = `${protocol}://${host}/audio/${audioId}.mp3`;
+
+    return res.status(200).json({
+      audio_id: audioId,
+      duration: duration || 1.0,
+      file_size: fileSize,
+      url: url
+    });
+  } catch (err) {
+    console.error("TTS generation failed:", err);
+    return res.status(500).json({ error: `TTS generation failed: ${err.message}` });
+  }
 });
 
-// Serve static files from the audio directory (if needed)
-app.use('/audio', express.static(AUDIO_DIR));
+/**
+ * Roblox Upload Endpoint
+ * POST /api/upload-to-roblox
+ */
+app.post('/api/upload-to-roblox', async (req, res) => {
+  const { audioId } = req.body;
+  
+  if (!audioId) {
+    return res.status(400).json({ error: "Missing audioId" });
+  }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`TTS server listening on port ${PORT}`);
+  const mp3File = path.join(AUDIO_DIR, `${audioId}.mp3`);
+  
+  try {
+    const exists = await fsPromises.access(mp3File)
+      .then(() => true)
+      .catch(() => false);
+      
+    if (!exists) {
+      return res.status(404).json({ error: "Audio file not found" });
+    }
+    
+    const assetId = await uploadToRoblox(mp3File, audioId);
+    
+    console.log(`Upload successful. Asset ID: ${assetId}`);
+    return res.status(200).json({ robloxAssetId: assetId });
+  } catch (err) {
+    console.error("Roblox upload failed:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Health check endpoint
+ * GET /health
+ */
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', version: '1.1.0' });
+});
+
+// Serve static files
+app.use('/audio', express.static(AUDIO_DIR, {
+  maxAge: '1d',
+  immutable: true
+}));
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Start server
+app.listen(config.PORT, () => {
+  console.log(`TTS server listening on port ${config.PORT}`);
+  console.log(`Using authentication: ${config.ROBLOX_API_KEY ? 'API Key' : (config.ROBLOX_SECURITY_COOKIE ? 'Cookie' : 'None')}`);
+  console.log(`Creator: ${config.CREATOR_TYPE} ID ${config.CREATOR_ID || 'not set'}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  process.exit(0);
 });

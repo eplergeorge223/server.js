@@ -306,7 +306,6 @@ async function uploadToRoblox(audioFile, audioId) {
       if (opData && opData.done) {
         if (opData.response && opData.response.assetId) {
           assetId = opData.response.assetId;
-          break;
         } else if (opData.error) {
           throw new Error(`Asset upload failed: ${opData.error.message || "unknown error"}`);
         }
@@ -315,7 +314,7 @@ async function uploadToRoblox(audioFile, audioId) {
     }
     
     if (!assetId) {
-      throw new Error("Asset processing timed out");
+      throw new Error("Asset processing not completed. Please try again later.");
     }
   } else if (!useOpenCloud) {
     // For legacy API, extract asset ID directly

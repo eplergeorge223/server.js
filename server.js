@@ -4,11 +4,12 @@ const FormData = require('form-data');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 // Optionally, load environment variables (e.g., API key, creator ID) if using a .env file
 // require('dotenv').config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json());  // for parsing JSON request bodies
 
 // Configuration – set your Roblox API key (preferred) or .ROBLOSECURITY cookie and creator info
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY || "";       // Your Open Cloud API key
@@ -26,24 +27,104 @@ if (!fs.existsSync(AUDIO_DIR)) {
 }
 
 /**
- * TTS generation function.
- * Replace this stub with your actual TTS logic.
- * It should generate an MP3 file from the given text and return its file path.
+ * Run espeak to generate a WAV file from the given text.
+ * @param {string} text - The text to synthesize.
+ * @param {string} voice - The voice to use (e.g., "en").
+ * @param {number} speed - The speaking rate.
+ * @param {string} outputPath - Path where the WAV file will be saved.
+ */
+function runEspeak(text, voice, speed, outputPath) {
+  return new Promise((resolve, reject) => {
+    const espeak = spawn('espeak', [
+      '-v', voice,
+      '-s', speed.toString(),
+      text,
+      '-w', outputPath
+    ]);
+    let errorOutput = "";
+    espeak.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+    espeak.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`eSpeak failed with code ${code}: ${errorOutput}`));
+      }
+    });
+  });
+}
+
+/**
+ * Convert a WAV file to MP3 using ffmpeg.
+ * @param {string} inputPath - Path to the input WAV file.
+ * @param {string} outputPath - Path where the MP3 file will be saved.
+ */
+function convertToMp3(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn('ffmpeg', [
+      '-i', inputPath,
+      '-acodec', 'libmp3lame',
+      '-ab', '128k',
+      '-ar', '44100',
+      '-y', // overwrite output if exists
+      outputPath
+    ]);
+    let errorOutput = "";
+    ffmpeg.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+    ffmpeg.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`FFmpeg failed with code ${code}: ${errorOutput}`));
+      }
+    });
+  });
+}
+
+/**
+ * generateTTSAudio
+ * Generates an MP3 audio file from text using espeak and ffmpeg.
+ * Checks for the existence of a cached file before generating.
+ * Returns an object { audioFilePath, audioId }.
  */
 async function generateTTSAudio(text, voice = "en", speed = 175) {
-  // For caching, create a hash from the parameters.
+  // Verify that required environmental variables (if any) are present.
+  // (In this implementation, we assume espeak and ffmpeg are installed.)
+  
+  // Create a unique hash based on text and parameters
   const hash = crypto.createHash('md5').update(`${text}${voice}${speed}`).digest('hex');
+  const wavFile = path.join(AUDIO_DIR, `${hash}.wav`);
   const mp3File = path.join(AUDIO_DIR, `${hash}.mp3`);
 
-  // If file already exists, simply return its path.
+  // Return cached MP3 if it exists
   if (fs.existsSync(mp3File)) {
     return { audioFilePath: mp3File, audioId: hash };
   }
 
-  // Otherwise, generate the audio.
-  // Replace the following dummy code with your TTS engine (e.g., espeak, an external API, etc.)
-  fs.writeFileSync(mp3File, "DUMMY AUDIO CONTENT");
-  // Optionally, compute duration and file size here.
+  try {
+    // Run espeak to produce a WAV file
+    await runEspeak(text, voice, speed, wavFile);
+  } catch (err) {
+    throw new Error(`eSpeak generation error: ${err.message}`);
+  }
+
+  try {
+    // Convert the WAV file to MP3 using ffmpeg
+    await convertToMp3(wavFile, mp3File);
+  } catch (err) {
+    // Clean up the wav file if conversion fails
+    if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
+    throw new Error(`FFmpeg conversion error: ${err.message}`);
+  }
+
+  // Clean up the temporary WAV file
+  if (fs.existsSync(wavFile)) {
+    fs.unlinkSync(wavFile);
+  }
+
   return { audioFilePath: mp3File, audioId: hash };
 }
 
@@ -68,7 +149,7 @@ app.post('/api/tts', async (req, res) => {
 
   const { audioFilePath, audioId } = audioResult;
 
-  // Read the generated audio file to get its size (duration could be computed with a tool, here we set a dummy value)
+  // Read the generated audio file and get file stats
   let audioData;
   try {
     audioData = fs.readFileSync(audioFilePath);
@@ -77,15 +158,13 @@ app.post('/api/tts', async (req, res) => {
     return res.status(500).json({ error: "Failed to read generated audio file." });
   }
   const stats = fs.statSync(audioFilePath);
-  // For demo, we use a dummy duration of 1.0 seconds.
+  // For demonstration purposes, we set a dummy duration.
   const duration = 1.0;
 
-  // Build the URL from which the audio file can be fetched (adjust host as needed)
-  // For example, if you are serving static files from the audio folder:
+  // Build the URL for static access (adjust host/https as needed)
   const host = req.get('host');
   const url = `https://${host}/audio/${audioId}.mp3`;
 
-  // Return response with audio_id and metadata.
   return res.status(200).json({
     audio_id: audioId,
     duration: duration,
@@ -113,7 +192,6 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     return res.status(404).json({ error: "Audio file not found" });
   }
 
-  // Log file stats
   const stats = fs.statSync(mp3File);
   console.log('File stats:', {
     size: stats.size,
@@ -145,9 +223,9 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   formData.append('fileContent', fs.readFileSync(mp3File), "ttsAudio.mp3");
 
   // Set up headers for the request
-  const useOpenCloud = !!ROBLOX_API_KEY;  // true if using API key auth
+  const useOpenCloud = !!ROBLOX_API_KEY;
   const headers = { 
-    ...formData.getHeaders()  // includes proper Content-Type with boundary
+    ...formData.getHeaders()
   };
   if (useOpenCloud) {
     headers['x-api-key'] = ROBLOX_API_KEY;
@@ -156,10 +234,9 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   }
 
   const uploadUrl = useOpenCloud 
-    ? "https://apis.roblox.com/assets/v1/assets"  // Open Cloud Assets API endpoint
-    : "https://www.roblox.com/asset/request-upload";  // Legacy endpoint (if applicable)
+    ? "https://apis.roblox.com/assets/v1/assets"
+    : "https://www.roblox.com/asset/request-upload";
 
-  // Attempt to upload with retries and exponential backoff
   let responseData;
   let lastError;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -168,7 +245,6 @@ app.post('/api/upload-to-roblox', async (req, res) => {
       responseData = response.data;
       break;
     } catch (err) {
-      // If using cookie auth, check for CSRF token
       if (!useOpenCloud && err.response && err.response.status === 403) {
         const csrfToken = err.response.headers['x-csrf-token'];
         if (csrfToken) {
@@ -202,7 +278,6 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     return res.status(500).json({ error: "Audio upload failed. Please try again later." });
   }
 
-  // For Open Cloud, poll for operation status to get assetId
   let assetId = null;
   if (useOpenCloud && responseData.path) {
     const operationPath = responseData.path;
@@ -232,7 +307,6 @@ app.post('/api/upload-to-roblox', async (req, res) => {
       return res.status(500).json({ error: "Asset processing not completed. Please try again later." });
     }
   } else if (!useOpenCloud) {
-    // Legacy response parsing
     if (responseData.assetId) {
       assetId = responseData.assetId;
     } else if (responseData.Id) {
@@ -248,10 +322,9 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   return res.status(200).json({ robloxAssetId: assetId });
 });
 
-// (Optional) Serve static files from the audio directory if needed
+// Serve static files from the audio directory (if needed)
 app.use('/audio', express.static(AUDIO_DIR));
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`TTS server listening on port ${PORT}`);

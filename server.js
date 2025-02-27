@@ -162,42 +162,6 @@ app.post('/api/tts', async (req, res) => {
 });
 
 /**
- * Helper function: createSound
- * Creates a Sound instance and parents it to a common folder in Workspace so that it replicates to all clients.
- */
-function createSound(soundData, position) {
-  // Create or get the TTSSounds folder in Workspace
-  let folder = workspace:FindFirstChild("TTSSounds");
-  if (not folder) then
-      folder = Instance.new("Folder")
-      folder.Name = "TTSSounds"
-      folder.Parent = workspace
-  end
-
-  local sound = Instance.new("Sound");
-  sound.Volume = 0; -- Start at 0 for fade-in
-  sound.RollOffMode = Enum.RollOffMode.Linear;
-  sound.SoundId = soundData.audioData;
-
-  if position then
-    -- Create an invisible part at the given position
-    local part = Instance.new("Part");
-    part.Name = "TTSSoundPart";
-    part.Size = Vector3.new(1, 1, 1);
-    part.CFrame = CFrame.new(position);
-    part.Transparency = 1;
-    part.Anchored = true;
-    part.CanCollide = false;
-    part.Parent = folder;
-    sound.Parent = part;
-  else
-    sound.Parent = folder;
-  end
-
-  return sound;
-}
-
-/**
  * POST /api/upload-to-roblox
  * Expects JSON: { audioId }
  * Reads the corresponding MP3 file and uploads it to Roblox.
@@ -306,7 +270,7 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   if (useOpenCloud && responseData.path) {
     const operationPath = responseData.path;
     try {
-      // Increase polling attempts to 20 (1 second interval)
+      // Increase polling attempts to 20
       for (let i = 0; i < 20; i++) {
         await new Promise(r => setTimeout(r, 1000));
         const opResponse = await axios.get(`https://apis.roblox.com/assets/v1/${operationPath}`, {

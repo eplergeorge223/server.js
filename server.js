@@ -19,7 +19,7 @@ app.use(express.json());
 const config = {
   ROBLOX_API_KEY: process.env.ROBLOX_API_KEY || "",
   ROBLOX_SECURITY_COOKIE: process.env.ROBLOX_SECURITY || "",
-  CREATOR_TYPE: process.env.CREATOR_TYPE || "Group",
+  CREATOR_TYPE: process.env.CREATOR_TYPE || "User",
   CREATOR_ID: process.env.CREATOR_ID || "",
   MAX_RETRIES: Number(process.env.MAX_RETRIES) || 5,
   BASE_RETRY_DELAY: Number(process.env.BASE_RETRY_DELAY) || 500,
@@ -59,7 +59,7 @@ function executeCommand(command, args, errorMessage) {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(${errorMessage} (${code}): ${stderr}));
+        reject(new Error(`${errorMessage} (${code}): ${stderr}`));
       }
     });
   });
@@ -132,9 +132,9 @@ async function getAudioDuration(filePath) {
  */
 async function generateTTSAudio(text, voice = "en", speed = 175) {
   // Create a unique hash for cache key
-  const hash = crypto.createHash('md5').update(${text}${voice}${speed}).digest('hex');
-  const wavFile = path.join(AUDIO_DIR, ${hash}.wav);
-  const mp3File = path.join(AUDIO_DIR, ${hash}.mp3);
+  const hash = crypto.createHash('md5').update(`${text}${voice}${speed}`).digest('hex');
+  const wavFile = path.join(AUDIO_DIR, `${hash}.wav`);
+  const mp3File = path.join(AUDIO_DIR, `${hash}.mp3`);
   
   // Check memory cache first
   if (CACHE.has(hash)) {
@@ -204,7 +204,7 @@ async function uploadToRoblox(audioFile, audioId) {
   }
 
   const useOpenCloud = !!config.ROBLOX_API_KEY;
-  const assetName = TTS Audio ${audioId.substring(0, 8)};
+  const assetName = `TTS Audio ${audioId.substring(0, 8)}`;
   
   // Create form data for upload
   const formData = new FormData();
@@ -233,7 +233,7 @@ async function uploadToRoblox(audioFile, audioId) {
   if (useOpenCloud) {
     headers['x-api-key'] = config.ROBLOX_API_KEY;
   } else if (config.ROBLOX_SECURITY_COOKIE) {
-    headers['Cookie'] = .ROBLOSECURITY=${config.ROBLOX_SECURITY_COOKIE};
+    headers['Cookie'] = `.ROBLOSECURITY=${config.ROBLOX_SECURITY_COOKIE}`;
   }
 
   const uploadUrl = useOpenCloud 
@@ -267,7 +267,7 @@ async function uploadToRoblox(audioFile, audioId) {
         const status = err.response ? err.response.status : null;
         if (!err.response || status === 429 || status >= 500) {
           const delay = Math.pow(2, attempt) * config.BASE_RETRY_DELAY;
-          console.log(Upload attempt ${attempt} failed (${status || 'network error'}). Retrying in ${delay}ms);
+          console.log(`Upload attempt ${attempt} failed (${status || 'network error'}). Retrying in ${delay}ms`);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -278,9 +278,9 @@ async function uploadToRoblox(audioFile, audioId) {
 
   if (!responseData) {
     if (lastError?.response) {
-      throw new Error(Upload failed: ${lastError.response.status} - ${JSON.stringify(lastError.response.data)});
+      throw new Error(`Upload failed: ${lastError.response.status} - ${JSON.stringify(lastError.response.data)}`);
     } else if (lastError) {
-      throw new Error(Upload failed: ${lastError.message});
+      throw new Error(`Upload failed: ${lastError.message}`);
     } else {
       throw new Error("Upload failed with unknown error");
     }
@@ -296,18 +296,18 @@ async function uploadToRoblox(audioFile, audioId) {
     for (let i = 0; i < config.MAX_OPERATION_POLLING_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, config.OPERATION_POLLING_INTERVAL));
       
-      const opResponse = await axios.get(https://apis.roblox.com/assets/v1/${operationPath}, {
+      const opResponse = await axios.get(`https://apis.roblox.com/assets/v1/${operationPath}`, {
         headers: { 'x-api-key': config.ROBLOX_API_KEY }
       });
       
       const opData = opResponse.data;
-      console.log(Operation status (attempt ${i + 1}):, opData.status || opData.done || 'pending');
+      console.log(`Operation status (attempt ${i + 1}):`, opData.status || opData.done || 'pending');
       
       if (opData && opData.done) {
         if (opData.response && opData.response.assetId) {
           assetId = opData.response.assetId;
         } else if (opData.error) {
-          throw new Error(Asset upload failed: ${opData.error.message || "unknown error"});
+          throw new Error(`Asset upload failed: ${opData.error.message || "unknown error"}`);
         }
         break;
       }
@@ -347,7 +347,7 @@ app.post('/api/tts', async (req, res) => {
     // Build URL for static access
     const protocol = req.get('x-forwarded-proto') || req.protocol;
     const host = req.get('host');
-    const url = ${protocol}://${host}/audio/${audioId}.mp3;
+    const url = `${protocol}://${host}/audio/${audioId}.mp3`;
 
     return res.status(200).json({
       audio_id: audioId,
@@ -357,7 +357,7 @@ app.post('/api/tts', async (req, res) => {
     });
   } catch (err) {
     console.error("TTS generation failed:", err);
-    return res.status(500).json({ error: TTS generation failed: ${err.message} });
+    return res.status(500).json({ error: `TTS generation failed: ${err.message}` });
   }
 });
 
@@ -372,7 +372,7 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     return res.status(400).json({ error: "Missing audioId" });
   }
 
-  const mp3File = path.join(AUDIO_DIR, ${audioId}.mp3);
+  const mp3File = path.join(AUDIO_DIR, `${audioId}.mp3`);
   
   try {
     const exists = await fsPromises.access(mp3File)
@@ -385,7 +385,7 @@ app.post('/api/upload-to-roblox', async (req, res) => {
     
     const assetId = await uploadToRoblox(mp3File, audioId);
     
-    console.log(Upload successful. Asset ID: ${assetId});
+    console.log(`Upload successful. Asset ID: ${assetId}`);
     return res.status(200).json({ robloxAssetId: assetId });
   } catch (err) {
     console.error("Roblox upload failed:", err);
@@ -415,9 +415,9 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(config.PORT, () => {
-  console.log(TTS server listening on port ${config.PORT});
-  console.log(Using authentication: ${config.ROBLOX_API_KEY ? 'API Key' : (config.ROBLOX_SECURITY_COOKIE ? 'Cookie' : 'None')});
-  console.log(Creator: ${config.CREATOR_TYPE} ID ${config.CREATOR_ID || 'not set'});
+  console.log(`TTS server listening on port ${config.PORT}`);
+  console.log(`Using authentication: ${config.ROBLOX_API_KEY ? 'API Key' : (config.ROBLOX_SECURITY_COOKIE ? 'Cookie' : 'None')}`);
+  console.log(`Creator: ${config.CREATOR_TYPE} ID ${config.CREATOR_ID || 'not set'}`);
 });
 
 // Graceful shutdown
@@ -425,3 +425,5 @@ process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
   process.exit(0);
 });
+
+Where do I find the new cookie ?

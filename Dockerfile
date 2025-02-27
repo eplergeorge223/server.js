@@ -6,27 +6,21 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy package files
+# Copy package files and install dependencies
 COPY package*.json ./
-
-# Install dependencies
 RUN npm install
-RUN npm install node-fetch@2
-RUN npm install form-data
 
-
-# Copy source code
+# Copy the rest of the source code
 COPY . .
 
-# Create output directory and set permissions (update to match your code's directory)
-RUN mkdir -p tts_output && \
-    chmod 777 tts_output && \
-    chown -R node:node .
+# Create the audio directory (used by your code) and set permissions
+RUN mkdir -p audio && \
+    chmod -R 777 audio
 
-# Expose the port the app runs on
+# Expose the port your app listens on
 EXPOSE 3000
 
 # Switch to non-root user

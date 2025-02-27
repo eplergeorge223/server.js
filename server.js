@@ -5,11 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-// Optionally, load environment variables (e.g., API key, creator ID) if using a .env file
+// Optionally, load environment variables from a .env file
 // require('dotenv').config();
 
 const app = express();
-app.use(express.json());  // for parsing JSON request bodies
+app.use(express.json());
 
 // Configuration – set your Roblox API key (preferred) or .ROBLOSECURITY cookie and creator info
 const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY || "";       // Your Open Cloud API key
@@ -27,11 +27,8 @@ if (!fs.existsSync(AUDIO_DIR)) {
 }
 
 /**
- * Run espeak to generate a WAV file from the given text.
- * @param {string} text - The text to synthesize.
- * @param {string} voice - The voice to use (e.g., "en").
- * @param {number} speed - The speaking rate.
- * @param {string} outputPath - Path where the WAV file will be saved.
+ * runEspeak
+ * Uses espeak to generate a WAV file from the given text.
  */
 function runEspeak(text, voice, speed, outputPath) {
   return new Promise((resolve, reject) => {
@@ -56,9 +53,8 @@ function runEspeak(text, voice, speed, outputPath) {
 }
 
 /**
- * Convert a WAV file to MP3 using ffmpeg.
- * @param {string} inputPath - Path to the input WAV file.
- * @param {string} outputPath - Path where the MP3 file will be saved.
+ * convertToMp3
+ * Uses ffmpeg to convert a WAV file to MP3.
  */
 function convertToMp3(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
@@ -67,7 +63,7 @@ function convertToMp3(inputPath, outputPath) {
       '-acodec', 'libmp3lame',
       '-ab', '128k',
       '-ar', '44100',
-      '-y', // overwrite output if exists
+      '-y',
       outputPath
     ]);
     let errorOutput = "";
@@ -86,15 +82,15 @@ function convertToMp3(inputPath, outputPath) {
 
 /**
  * generateTTSAudio
- * Generates an MP3 audio file from text using espeak and ffmpeg.
- * Checks for the existence of a cached file before generating.
- * Returns an object { audioFilePath, audioId }.
+ * Generates an MP3 file from text by first calling espeak (to produce a WAV)
+ * and then converting that WAV file to MP3 using ffmpeg.
+ * Returns { audioFilePath, audioId }.
  */
 async function generateTTSAudio(text, voice = "en", speed = 175) {
-  // Verify that required environmental variables (if any) are present.
-  // (In this implementation, we assume espeak and ffmpeg are installed.)
-  
-  // Create a unique hash based on text and parameters
+  // Check that environment variables are set (if needed)
+  // (This implementation assumes espeak and ffmpeg are installed and in PATH.)
+
+  // Create a unique hash from text, voice, and speed
   const hash = crypto.createHash('md5').update(`${text}${voice}${speed}`).digest('hex');
   const wavFile = path.join(AUDIO_DIR, `${hash}.wav`);
   const mp3File = path.join(AUDIO_DIR, `${hash}.mp3`);
@@ -105,25 +101,20 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
   }
 
   try {
-    // Run espeak to produce a WAV file
     await runEspeak(text, voice, speed, wavFile);
   } catch (err) {
     throw new Error(`eSpeak generation error: ${err.message}`);
   }
 
   try {
-    // Convert the WAV file to MP3 using ffmpeg
     await convertToMp3(wavFile, mp3File);
   } catch (err) {
-    // Clean up the wav file if conversion fails
     if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
     throw new Error(`FFmpeg conversion error: ${err.message}`);
   }
 
-  // Clean up the temporary WAV file
-  if (fs.existsSync(wavFile)) {
-    fs.unlinkSync(wavFile);
-  }
+  // Clean up temporary WAV file
+  if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
 
   return { audioFilePath: mp3File, audioId: hash };
 }
@@ -158,10 +149,10 @@ app.post('/api/tts', async (req, res) => {
     return res.status(500).json({ error: "Failed to read generated audio file." });
   }
   const stats = fs.statSync(audioFilePath);
-  // For demonstration purposes, we set a dummy duration.
+  // For demonstration, a dummy duration (replace with actual duration if available)
   const duration = 1.0;
 
-  // Build the URL for static access (adjust host/https as needed)
+  // Build URL for static access (adjust scheme/host as necessary)
   const host = req.get('host');
   const url = `https://${host}/audio/${audioId}.mp3`;
 

@@ -32,7 +32,7 @@ const config = {
   // Numeric ID of user or group
   CREATOR_ID: process.env.CREATOR_ID || "",
   MAX_RETRIES: Number(process.env.MAX_RETRIES) || 5,
-  // Increased default retry delay to 1000ms to mitigate 429/408 errors
+  // Increased default retry delay to 1000ms to help avoid rate limits
   BASE_RETRY_DELAY: Number(process.env.BASE_RETRY_DELAY) || 1000,
   PORT: process.env.PORT || 3000,
   // For Open Cloud polling
@@ -164,10 +164,10 @@ async function getAudioDuration(filePath) {
 
 /*******************************************************
  * generateTTSAudio:
- * 1) Check memory/disk cache
- * 2) Run eSpeak to produce WAV
- * 3) Convert WAV->MP3
- * 4) Return local file path + metadata
+ * 1) Check memory/disk cache.
+ * 2) Run eSpeak to produce WAV.
+ * 3) Convert WAV -> MP3.
+ * 4) Return local file path + metadata.
  *******************************************************/
 async function generateTTSAudio(text, voice = "en", speed = 175) {
   // Create unique hash (text+voice+speed)
@@ -232,7 +232,7 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
 /*******************************************************
  * uploadToRoblox:
  * 1) Use Open Cloud API (if ROBLOX_API_KEY is set) or cookie-based auth.
- * 2) Uploads the audio file and returns the new assetId.
+ * 2) Upload the audio file and return the new assetId.
  *******************************************************/
 async function uploadToRoblox(audioFile, audioId) {
   if (!config.CREATOR_ID) {
@@ -279,7 +279,7 @@ async function uploadToRoblox(audioFile, audioId) {
       responseData = response.data;
       break; // success
     } catch (err) {
-      // Handle CSRF token if needed
+      // Handle CSRF token if needed (legacy method)
       if (!useOpenCloud && err.response && err.response.status === 403) {
         const csrfToken = err.response.headers['x-csrf-token'];
         if (csrfToken) {
@@ -419,7 +419,7 @@ app.post('/api/pregenerate', async (req, res) => {
       console.error(`[TTS] Error processing dialogue "${text}":`, err);
       results[text] = { error: err.message, status: "failed" };
     }
-    // Optional: wait a bit between each dialogue to reduce rate limits (adjust as needed)
+    // Wait 3 seconds between dialogues to reduce rate-limit issues
     await new Promise(r => setTimeout(r, 3000));
   }
   res.json(results);

@@ -25,20 +25,16 @@ app.use(express.json());
 const config = {
   // If using Open Cloud, put your API key here:
   ROBLOX_API_KEY: process.env.ROBLOX_API_KEY || "",
-
   // If using Cookie-based auth:
   ROBLOX_SECURITY_COOKIE: process.env.ROBLOX_SECURITY || "",
-
   // "User" or "Group"
   CREATOR_TYPE: process.env.CREATOR_TYPE || "Group",
-
   // Numeric ID of user or group
   CREATOR_ID: process.env.CREATOR_ID || "",
-
   MAX_RETRIES: Number(process.env.MAX_RETRIES) || 5,
-  BASE_RETRY_DELAY: Number(process.env.BASE_RETRY_DELAY) || 500,
+  // Increased default retry delay to 1000ms to mitigate 429/408 errors
+  BASE_RETRY_DELAY: Number(process.env.BASE_RETRY_DELAY) || 1000,
   PORT: process.env.PORT || 3000,
-
   // For Open Cloud polling
   OPERATION_POLLING_INTERVAL: Number(process.env.OPERATION_POLLING_INTERVAL) || 1000,
   MAX_OPERATION_POLLING_ATTEMPTS: Number(process.env.MAX_OPERATION_POLLING_ATTEMPTS) || 20
@@ -213,7 +209,7 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
     const stats = await fsPromises.stat(mp3File);
     const duration = await getAudioDuration(mp3File);
 
-    // cleanup WAV file
+    // Cleanup WAV file
     await fsPromises.unlink(wavFile).catch((err) => {
       console.warn('[TTS] WAV cleanup error:', err.message);
     });
@@ -235,9 +231,8 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
 
 /*******************************************************
  * uploadToRoblox:
- * 1) Either use Open Cloud API (if ROBLOX_API_KEY set)
- * 2) Or use legacy cookie-based endpoint
- * 3) Return new assetId
+ * 1) Use Open Cloud API (if ROBLOX_API_KEY is set) or cookie-based auth.
+ * 2) Uploads the audio file and returns the new assetId.
  *******************************************************/
 async function uploadToRoblox(audioFile, audioId) {
   if (!config.CREATOR_ID) {
@@ -282,8 +277,9 @@ async function uploadToRoblox(audioFile, audioId) {
     try {
       const response = await axios.post(uploadUrl, formData, { headers });
       responseData = response.data;
-      break; // Success
+      break; // success
     } catch (err) {
+      // Handle CSRF token if needed
       if (!useOpenCloud && err.response && err.response.status === 403) {
         const csrfToken = err.response.headers['x-csrf-token'];
         if (csrfToken) {
@@ -423,6 +419,8 @@ app.post('/api/pregenerate', async (req, res) => {
       console.error(`[TTS] Error processing dialogue "${text}":`, err);
       results[text] = { error: err.message, status: "failed" };
     }
+    // Optional: wait a bit between each dialogue to reduce rate limits (adjust as needed)
+    await new Promise(r => setTimeout(r, 3000));
   }
   res.json(results);
 });

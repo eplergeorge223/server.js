@@ -4,8 +4,11 @@
  * An Express server that:
  * 1) Generates TTS MP3 via eSpeak (Node side).
  * 2) Uploads to Roblox as a group-owned asset.
- * 3) Returns the assetId for usage in rbxassetid://...
+ * 3) Caches approved asset IDs for common dialogue lines.
+ * 4) Provides endpoints for on-demand generation, batch
+ *    pre-generation, and asset lookup.
  ********************************************************/
+
 const express = require('express');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -43,8 +46,36 @@ const config = {
 
 //-------------- AUDIO STORAGE & CACHE --------------
 const AUDIO_DIR = path.join(process.cwd(), 'audio');
-// Optional in-memory cache to skip regenerating the same text
-const CACHE = new Map(); // Key: hash, Value: { audioFilePath, audioId, duration, fileSize }
+const CACHE = new Map(); // In-memory cache (key: hash, value: { audioFilePath, audioId, duration, fileSize })
+
+// Persistent cache file path for pre-generated dialogues
+const CACHE_FILE = path.join(process.cwd(), 'cache.json');
+let persistentCache = new Map();
+
+// Load persistent cache from file
+async function loadPersistentCache() {
+  try {
+    const data = await fsPromises.readFile(CACHE_FILE, 'utf8');
+    const parsed = JSON.parse(data);
+    for (const key in parsed) {
+      persistentCache.set(key, parsed[key]);
+    }
+    console.log('[TTS] Persistent cache loaded.');
+  } catch (err) {
+    console.warn('[TTS] No persistent cache found. Starting fresh.');
+  }
+}
+
+// Save persistent cache to file
+async function savePersistentCache() {
+  try {
+    const obj = Object.fromEntries(persistentCache);
+    await fsPromises.writeFile(CACHE_FILE, JSON.stringify(obj, null, 2), 'utf8');
+    console.log('[TTS] Persistent cache saved.');
+  } catch (err) {
+    console.error('[TTS] Error saving persistent cache:', err);
+  }
+}
 
 (async () => {
   // Ensure audio directory exists
@@ -55,6 +86,7 @@ const CACHE = new Map(); // Key: hash, Value: { audioFilePath, audioId, duration
     console.error('[TTS] Failed to create audio directory:', err);
     process.exit(1);
   }
+  await loadPersistentCache();
 })();
 
 /*******************************************************
@@ -126,7 +158,6 @@ async function getAudioDuration(filePath) {
     
     ffprobe.on('close', (code) => {
       if (code === 0) {
-        // parse float
         resolve(parseFloat(output.trim()) || 0);
       } else {
         resolve(0);
@@ -162,7 +193,6 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
     exists = false;
   }
   if (exists) {
-    // Already on disk, gather stats + return
     const stats = await fsPromises.stat(mp3File);
     const duration = await getAudioDuration(mp3File);
     const result = {
@@ -175,23 +205,19 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
     return result;
   }
 
-  // 3) Not in cache, generate new
+  // 3) Not in cache, generate new audio
   try {
-    // espeak -> WAV
     await runEspeak(text, voice, speed, wavFile);
-    // ffmpeg -> MP3
     await convertToMp3(wavFile, mp3File);
 
-    // gather info
     const stats = await fsPromises.stat(mp3File);
     const duration = await getAudioDuration(mp3File);
 
-    // cleanup WAV
+    // cleanup WAV file
     await fsPromises.unlink(wavFile).catch((err) => {
       console.warn('[TTS] WAV cleanup error:', err.message);
     });
 
-    // store in memory
     const result = {
       audioFilePath: mp3File,
       audioId: hash,
@@ -200,9 +226,7 @@ async function generateTTSAudio(text, voice = "en", speed = 175) {
     };
     CACHE.set(hash, result);
     return result;
-
   } catch (err) {
-    // if fail, cleanup partial
     await fsPromises.unlink(wavFile).catch(() => {});
     await fsPromises.unlink(mp3File).catch(() => {});
     throw err;
@@ -223,7 +247,6 @@ async function uploadToRoblox(audioFile, audioId) {
   const useOpenCloud = !!config.ROBLOX_API_KEY;
   const assetName = `TTS Audio ${audioId.substring(0, 8)}`;
 
-  // Build form data
   const formData = new FormData();
   const requestPayload = {
     assetType: "Audio",
@@ -232,7 +255,6 @@ async function uploadToRoblox(audioFile, audioId) {
     displayName: assetName
   };
 
-  // Set the group or user ID
   if (config.CREATOR_TYPE.toLowerCase() === "group") {
     requestPayload.creationContext.creator.groupId = Number(config.CREATOR_ID);
   } else {
@@ -242,7 +264,6 @@ async function uploadToRoblox(audioFile, audioId) {
   formData.append('request', JSON.stringify(requestPayload), { contentType: 'application/json' });
   formData.append('fileContent', fs.createReadStream(audioFile), "ttsAudio.mp3");
 
-  // Headers
   const headers = { ...formData.getHeaders() };
   if (useOpenCloud) {
     headers['x-api-key'] = config.ROBLOX_API_KEY;
@@ -250,7 +271,6 @@ async function uploadToRoblox(audioFile, audioId) {
     headers['Cookie'] = `.ROBLOSECURITY=${config.ROBLOX_SECURITY_COOKIE}`;
   }
 
-  // Endpoint
   const uploadUrl = useOpenCloud
     ? "https://apis.roblox.com/assets/v1/assets"
     : "https://www.roblox.com/asset/request-upload";
@@ -258,14 +278,12 @@ async function uploadToRoblox(audioFile, audioId) {
   let responseData;
   let lastError;
 
-  // Retry logic
   for (let attempt = 1; attempt <= config.MAX_RETRIES; attempt++) {
     try {
       const response = await axios.post(uploadUrl, formData, { headers });
       responseData = response.data;
-      break; // success
+      break; // Success
     } catch (err) {
-      // if 403 => possibly need x-csrf-token
       if (!useOpenCloud && err.response && err.response.status === 403) {
         const csrfToken = err.response.headers['x-csrf-token'];
         if (csrfToken) {
@@ -275,11 +293,8 @@ async function uploadToRoblox(audioFile, audioId) {
         }
       }
       lastError = err;
-
-      // Retry if relevant
       if (attempt < config.MAX_RETRIES) {
         const status = err.response ? err.response.status : null;
-        // Retry on 429 or 5xx
         if (!err.response || status === 429 || status >= 500) {
           const delay = Math.pow(2, attempt) * config.BASE_RETRY_DELAY;
           console.log(`[TTS] Upload attempt ${attempt} failed (${status || 'network'}). Retrying in ${delay}ms`);
@@ -287,7 +302,6 @@ async function uploadToRoblox(audioFile, audioId) {
           continue;
         }
       }
-      // else break out
       break;
     }
   }
@@ -302,14 +316,9 @@ async function uploadToRoblox(audioFile, audioId) {
     }
   }
 
-  // Parse assetId from response
   let assetId = null;
-
-  // If using Open Cloud
   if (useOpenCloud && responseData.path) {
     const operationPath = responseData.path;
-    
-    // poll operation status
     for (let i = 0; i < config.MAX_OPERATION_POLLING_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, config.OPERATION_POLLING_INTERVAL));
       const opResponse = await axios.get(`https://apis.roblox.com/assets/v1/${operationPath}`, {
@@ -327,20 +336,15 @@ async function uploadToRoblox(audioFile, audioId) {
         break;
       }
     }
-
     if (!assetId) {
       throw new Error("[TTS] Asset processing not completed. Try again later.");
     }
-
-  // If using legacy
   } else if (!useOpenCloud) {
-    // Usually responseData.assetId or responseData.Id
     assetId = responseData.assetId || responseData.Id;
     if (!assetId) {
       throw new Error("[TTS] Failed to retrieve asset ID from response");
     }
   }
-
   return assetId;
 }
 
@@ -348,19 +352,17 @@ async function uploadToRoblox(audioFile, audioId) {
  * EXPRESS ROUTES
  *******************************************************/
 
-// 1) TTS Generation
+// 1) On-Demand TTS Generation (for testing or fallback)
 app.post('/api/tts', async (req, res) => {
   const { text, voice = "en", speed = 175 } = req.body;
   if (!text || !text.trim()) {
     return res.status(400).json({ error: "No text provided for TTS" });
   }
-
   try {
     const { audioFilePath, audioId, duration, fileSize } = await generateTTSAudio(text, voice, speed);
     const protocol = req.get('x-forwarded-proto') || req.protocol;
     const host = req.get('host');
     const url = `${protocol}://${host}/audio/${audioId}.mp3`;
-
     return res.status(200).json({
       audio_id: audioId,
       duration: duration || 1.0,
@@ -373,21 +375,18 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
-// 2) Roblox Upload
+// 2) Roblox Upload (on demand)
 app.post('/api/upload-to-roblox', async (req, res) => {
   const { audioId } = req.body;
   if (!audioId) {
     return res.status(400).json({ error: "Missing audioId" });
   }
-  // optional: if you pass groupId from eSpeakWrapper, you could override config.CREATOR_ID here
-
   const mp3File = path.join(AUDIO_DIR, `${audioId}.mp3`);
   try {
     await fsPromises.access(mp3File);
   } catch {
     return res.status(404).json({ error: "Audio file not found" });
   }
-
   try {
     const assetId = await uploadToRoblox(mp3File, audioId);
     console.log(`[TTS] Upload successful. Asset ID: ${assetId}`);
@@ -398,12 +397,57 @@ app.post('/api/upload-to-roblox', async (req, res) => {
   }
 });
 
-// 3) Health check
+// 3) Batch Pre-Generation Endpoint
+// Expects JSON body: { dialogues: [ "Hello world", "How are you?", ... ] }
+app.post('/api/pregenerate', async (req, res) => {
+  const dialogues = req.body.dialogues;
+  if (!Array.isArray(dialogues) || dialogues.length === 0) {
+    return res.status(400).json({ error: "No dialogues provided" });
+  }
+  
+  const results = {};
+  for (const text of dialogues) {
+    try {
+      const { audioFilePath, audioId } = await generateTTSAudio(text);
+      // Check persistent cache first
+      let entry = persistentCache.get(audioId);
+      if (!entry || !entry.assetId) {
+        // Upload and cache the result
+        const assetId = await uploadToRoblox(audioFilePath, audioId);
+        entry = { text, assetId, status: "approved", timestamp: Date.now() };
+        persistentCache.set(audioId, entry);
+        await savePersistentCache();
+      }
+      results[text] = { assetId: entry.assetId, status: entry.status };
+    } catch (err) {
+      console.error(`[TTS] Error processing dialogue "${text}":`, err);
+      results[text] = { error: err.message, status: "failed" };
+    }
+  }
+  res.json(results);
+});
+
+// 4) Lookup Endpoint: Returns asset info for a given dialogue text.
+// Usage: GET /api/lookup?text=Hello%20world
+app.get('/api/lookup', async (req, res) => {
+  const text = req.query.text;
+  if (!text || !text.trim()) {
+    return res.status(400).json({ error: "No text provided" });
+  }
+  const hash = crypto.createHash('md5').update(text).digest('hex');
+  const data = persistentCache.get(hash);
+  if (data && data.assetId && data.status === "approved") {
+    return res.json({ assetId: data.assetId, status: data.status });
+  }
+  return res.json({ status: "pending", message: "Audio will be available later" });
+});
+
+// 5) Health Check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', version: '1.1.0' });
 });
 
-// 4) Serve static MP3 for debug
+// 6) Serve static MP3 files (for debug/testing)
 app.use('/audio', express.static(AUDIO_DIR, {
   maxAge: '1d',
   immutable: true
